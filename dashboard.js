@@ -1,3 +1,4 @@
+// TODO change canvas import for graph creation
 let weekOffset = 0;
 let monthOffset = 0;
 let currentView = "Weekly";
@@ -130,6 +131,7 @@ function drawGraph(labels, values) {
 }
 
 // render a simple word cloud for the session view, showing top 5 triggers with size based on count
+// TODO what would be other ways to change this? 
 function renderWordCloud(wordData) {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
@@ -300,42 +302,321 @@ function loadSession() {
   });
 }
 
-// export the current view's data as a CSV file, with different formats for session vs weekly/monthly data
-function exportCSV() {
+// export the current view as a clinical-style PDF using only the Canvas API (no external libs)
+function exportPDF() {
   if (!currentExportData || !currentExportData.rows.length) {
     alert("No data to export.");
     return;
   }
 
-  let csv = "";
-
-  // for session data, export word and count, for weekly/monthly export date and count
   if (currentExportData.type === "session") {
-    csv += "Word,Count\n";
-    currentExportData.rows.forEach(r => {
-      csv += `${r.word},${r.count}\n`;
-    });
-  } else {
-    csv += "Date,TriggerCount\n";
-    currentExportData.rows.forEach(r => {
-      csv += `${r.date},${r.count}\n`;
+    alert("PDF export is not available for the session view.");
+    return;
+  }
+
+  // True A4 at 3x for sharpness (595x842 logical = A4 points, rendered at 3x)
+  const SCALE = 3;
+  const W = 595, H = 842;
+  const ml = 40, mr = 40, contentW = W - ml - mr;
+
+  const c = document.createElement("canvas");
+  c.width = W * SCALE; c.height = H * SCALE;
+  const cx = c.getContext("2d");
+  cx.scale(SCALE, SCALE);
+
+  const RED   = "#DC3535";
+  const DARK  = "#1C1C1E";
+  const MID   = "#6B6B72";
+  const LIGHT = "#F8F8FA";
+  const SEP   = "#E0E0E5";
+  const WHITE = "#FFFFFF";
+
+  // background
+  cx.fillStyle = WHITE;
+  cx.fillRect(0, 0, W, H);
+
+  // header band
+  cx.fillStyle = RED;
+  cx.fillRect(0, 0, W, 52);
+  cx.fillStyle = WHITE;
+  cx.font = "bold 15px Arial, sans-serif";
+  cx.fillText("SENTINEL", ml, 23);
+  cx.font = "10px Arial, sans-serif";
+  cx.fillStyle = "rgba(255,255,255,0.75)";
+  cx.fillText("Trigger Monitoring System — Clinical Report", ml, 39);
+  cx.font = "bold 9px Arial, sans-serif";
+  cx.fillStyle = WHITE;
+  cx.textAlign = "right";
+  cx.fillText(currentExportData.type.toUpperCase(), W - mr, 23);
+  cx.textAlign = "left";
+
+  // meta row
+  let y = 66;
+  cx.fillStyle = LIGHT;
+  roundRect(cx, ml, y, contentW, 34, 5); cx.fill();
+
+  const now = new Date();
+  const generatedAt = now.toLocaleString("en-GB", {
+    day: "2-digit", month: "short", year: "numeric",
+    hour: "2-digit", minute: "2-digit"
+  });
+  const periodText = document.getElementById("periodLabel").textContent || "—";
+
+  cx.fillStyle = MID;
+  cx.font = "bold 7px Arial, sans-serif";
+  cx.fillText("PERIOD", ml + 12, y + 11);
+  cx.fillText("GENERATED", ml + contentW / 2 + 12, y + 11);
+  cx.fillStyle = DARK;
+  cx.font = "bold 10px Arial, sans-serif";
+  cx.fillText(periodText,  ml + 12, y + 26);
+  cx.fillText(generatedAt, ml + contentW / 2 + 12, y + 26);
+  cx.strokeStyle = SEP; cx.lineWidth = 1;
+  cx.beginPath();
+  cx.moveTo(ml + contentW / 2, y + 5);
+  cx.lineTo(ml + contentW / 2, y + 29);
+  cx.stroke();
+
+  y += 44;
+
+  // stat boxes
+  const rows = currentExportData.rows;
+  const totalHits = rows.reduce((s, r) => s + (r.count || 0), 0);
+  const isSession = currentExportData.type === "session";
+  const activeDays = isSession ? null : rows.filter(r => r.count > 0).length;
+  const avgPerDay  = (!isSession && activeDays > 0) ? (totalHits / activeDays).toFixed(1) : null;
+
+  const stats = [
+    { label: "TOTAL TRIGGERS", value: String(totalHits) },
+    avgPerDay !== null ? { label: "DAILY AVG", value: avgPerDay } : { label: "UNIQUE TERMS", value: String(rows.length) },
+    !isSession ? { label: "ACTIVE DAYS", value: String(activeDays) } : { label: "REPORT TYPE", value: "SESSION" }
+  ];
+
+  const bw = (contentW - 10) / 3;
+  stats.forEach((s, i) => {
+    const bx = ml + i * (bw + 5);
+    cx.fillStyle = (i === 0 && totalHits >= 5) ? "#FFEBEB" : (i === 0 && totalHits >= 3) ? "#FFF3EB" : LIGHT;
+    roundRect(cx, bx, y, bw, 40, 5); cx.fill();
+    cx.fillStyle = MID;
+    cx.font = "bold 7px Arial, sans-serif";
+    cx.textAlign = "center";
+    cx.fillText(s.label, bx + bw / 2, y + 12);
+    cx.fillStyle = (i === 0 && totalHits > 0) ? RED : DARK;
+    cx.font = "bold 20px Arial, sans-serif";
+    cx.fillText(s.value, bx + bw / 2, y + 34);
+    cx.textAlign = "left";
+  });
+
+  y += 50;
+
+  // divider + section label
+  cx.strokeStyle = SEP; cx.lineWidth = 1;
+  cx.beginPath(); cx.moveTo(ml, y); cx.lineTo(W - mr, y); cx.stroke();
+  y += 12;
+  cx.fillStyle = MID;
+  cx.font = "bold 7px Arial, sans-serif";
+  cx.fillText(isSession ? "TRIGGER TERM BREAKDOWN" : "DAILY TRIGGER LOG", ml, y);
+  y += 8;
+
+  // table — columns sized to exactly fill contentW
+  const ROW_H = 20;
+  const C1 = isSession ? 200 : 140;   // col1 width
+  const C2 = isSession ? 120 : 130;   // col2 width
+  const C3 = contentW - C1 - C2;      // col3 fills remainder — no overflow
+  const colLabels = isSession
+    ? ["Trigger Term", "Occurrences", "Share %"]
+    : ["Date", "Trigger Count", "Severity"];
+
+  // table header
+  cx.fillStyle = DARK;
+  cx.fillRect(ml, y, contentW, ROW_H);
+  cx.fillStyle = WHITE;
+  cx.font = "bold 9px Arial, sans-serif";
+  cx.textAlign = "left";
+  cx.fillText(colLabels[0], ml + 8, y + 14);
+  cx.textAlign = "center";
+  cx.fillText(colLabels[1], ml + C1 + C2 / 2, y + 14);
+  cx.fillText(colLabels[2], ml + C1 + C2 + C3 / 2, y + 14);
+  cx.textAlign = "left";
+  y += ROW_H;
+
+  // monthly: only show days with triggers
+  const tableRows = (currentExportData.type === "monthly")
+    ? rows.filter(r => r.count > 0)
+    : rows;
+
+  if (tableRows.length === 0) {
+    cx.fillStyle = MID;
+    cx.font = "11px Arial, sans-serif";
+    cx.textAlign = "center";
+    cx.fillText("No triggers recorded this period.", W / 2, y + 30);
+    cx.textAlign = "left";
+    y += 50;
+  }
+
+  tableRows.forEach((row, idx) => {
+    cx.fillStyle = idx % 2 === 0 ? WHITE : "#FAFAFA";
+    cx.fillRect(ml, y, contentW, ROW_H);
+
+    let col1, col2, col3, col3Color;
+    if (isSession) {
+      const share = totalHits > 0 ? ((row.count / totalHits) * 100).toFixed(1) : "0.0";
+      col1 = row.word; col2 = String(row.count); col3 = `${share}%`;
+      col3Color = MID;
+    } else {
+      const cnt = row.count;
+      col1 = row.date; col2 = String(cnt);
+      col3 = cnt >= 5 ? "Severe" : cnt >= 3 ? "High" : cnt >= 1 ? "Low" : "—";
+      col3Color = cnt >= 5 ? RED : cnt >= 3 ? "#C85010" : cnt >= 1 ? "#287828" : MID;
+    }
+
+    cx.font = "10px Arial, sans-serif";
+    cx.fillStyle = DARK; cx.textAlign = "left";
+    cx.fillText(col1, ml + 8, y + 14);
+    cx.textAlign = "center";
+    cx.fillText(col2, ml + C1 + C2 / 2, y + 14);
+    cx.fillStyle = col3Color;
+    cx.fillText(col3, ml + C1 + C2 + C3 / 2, y + 14);
+    cx.textAlign = "left";
+
+    cx.strokeStyle = SEP; cx.lineWidth = 0.5;
+    cx.beginPath(); cx.moveTo(ml, y + ROW_H); cx.lineTo(W - mr, y + ROW_H); cx.stroke();
+    y += ROW_H;
+  });
+
+  y += 16;
+
+  // severity legend (non-session)
+  if (!isSession) {
+    cx.strokeStyle = SEP; cx.lineWidth = 1;
+    cx.beginPath(); cx.moveTo(ml, y); cx.lineTo(W - mr, y); cx.stroke();
+    y += 12;
+    cx.fillStyle = MID;
+    cx.font = "bold 7px Arial, sans-serif";
+    cx.fillText("SEVERITY SCALE", ml, y);
+    y += 8;
+    [
+      { label: "Low (1–2/day)",   color: "#287828" },
+      { label: "High (3–4/day)",  color: "#C85010" },
+      { label: "Severe (≥5/day)", color: RED       },
+    ].forEach((l, i) => {
+      const lx = ml + i * 155;
+      cx.fillStyle = l.color;
+      roundRect(cx, lx, y, 8, 8, 2); cx.fill();
+      cx.fillStyle = DARK;
+      cx.font = "9px Arial, sans-serif";
+      cx.fillText(l.label, lx + 12, y + 8);
     });
   }
 
-  // create a blob from the CSV string and trigger a download 
-  // with a filename that includes the view type and timestamp
-  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-  const url = URL.createObjectURL(blob);
+  // footer — pinned to bottom of page
+  cx.strokeStyle = SEP; cx.lineWidth = 1;
+  cx.beginPath(); cx.moveTo(ml, H - 24); cx.lineTo(W - mr, H - 24); cx.stroke();
+  cx.fillStyle = MID;
+  cx.font = "8px Arial, sans-serif";
+  cx.textAlign = "center";
+  cx.fillText(`Sentinel TMS  ·  Generated ${generatedAt}  ·  Page 1 of 1`, W / 2, H - 10);
+  cx.textAlign = "left";
 
+  // export
+  const imgData = c.toDataURL("image/jpeg", 0.95);
+  const pdf = buildPDFFromImage(imgData, W * SCALE, H * SCALE);
+  const blob = new Blob([pdf], { type: "application/pdf" });
+  const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = `trigger_export_${currentExportData.type}_${Date.now()}.csv`;
+  a.download = `sentinel_report_${currentExportData.type}_${Date.now()}.pdf`;
   a.click();
-
   URL.revokeObjectURL(url);
 }
 
-document.getElementById("pdf").addEventListener("click", exportCSV);
+// helper: rounded rect path
+function roundRect(cx, x, y, w, h, r) {
+  cx.beginPath();
+  cx.moveTo(x + r, y);
+  cx.lineTo(x + w - r, y);
+  cx.quadraticCurveTo(x + w, y, x + w, y + r);
+  cx.lineTo(x + w, y + h - r);
+  cx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  cx.lineTo(x + r, y + h);
+  cx.quadraticCurveTo(x, y + h, x, y + h - r);
+  cx.lineTo(x, y + r);
+  cx.quadraticCurveTo(x, y, x + r, y);
+  cx.closePath();
+}
+
+// helper: build a minimal valid PDF with one JPEG image page, no external libs
+function buildPDFFromImage(dataURL, pxW, pxH) {
+  // strip data:image/jpeg;base64,
+  const b64 = dataURL.split(",")[1];
+  const imgBytes = atob(b64);
+
+  // A4 in PDF points (72dpi): 595 x 842 — we embed at full page
+  const pw = 595, ph = 842;
+
+  const imgLen = imgBytes.length;
+
+  // objects
+  const objs = {};
+
+  objs[1] = `1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n`;
+  objs[2] = `2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n`;
+  objs[3] = `3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pw} ${ph}] /Contents 4 0 R /Resources << /XObject << /Im1 5 0 R >> >> >>\nendobj\n`;
+
+  const stream = `q ${pw} 0 0 ${ph} 0 0 cm /Im1 Do Q`;
+  objs[4] = `4 0 obj\n<< /Length ${stream.length} >>\nstream\n${stream}\nendstream\nendobj\n`;
+
+  objs[5] = `5 0 obj\n<< /Type /XObject /Subtype /Image /Width ${pxW} /Height ${pxH} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${imgLen} >>\nstream\n`;
+
+  // build byte array
+  const header = "%PDF-1.4\n";
+  const parts = [header];
+  const offsets = {};
+
+  let offset = header.length;
+
+  [1, 2, 3, 4].forEach(n => {
+    offsets[n] = offset;
+    parts.push(objs[n]);
+    offset += objs[n].length;
+  });
+
+  // obj 5 header
+  offsets[5] = offset;
+  parts.push(objs[5]);
+  offset += objs[5].length;
+
+  // image binary
+  parts.push(imgBytes);
+  offset += imgLen;
+
+  const endStream = "\nendstream\nendobj\n";
+  parts.push(endStream);
+  offset += endStream.length;
+
+  // xref
+  const xrefOffset = offset;
+  const xref = [
+    "xref\n",
+    `0 6\n`,
+    `0000000000 65535 f \n`,
+    ...([1,2,3,4,5].map(n => `${String(offsets[n]).padStart(10,"0")} 00000 n \n`))
+  ].join("");
+  parts.push(xref);
+
+  const trailer = `trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`;
+  parts.push(trailer);
+
+  // combine into Uint8Array
+  const totalLen = parts.reduce((s, p) => s + p.length, 0);
+  const buf = new Uint8Array(totalLen);
+  let pos = 0;
+  parts.forEach(p => {
+    for (let i = 0; i < p.length; i++) buf[pos++] = p.charCodeAt(i) & 0xff;
+  });
+  return buf;
+}
+
+document.getElementById("pdf").addEventListener("click", exportPDF);
 
 // set up navigation buttons to load the corresponding views 
 // and reset offsets when switching between weekly and monthly

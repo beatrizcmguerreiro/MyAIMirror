@@ -3,10 +3,14 @@
   "name": "Sentinel - Reflective Awareness Monitor",
   "description": "Designed as a self-awareness and early-warning system, Sentinel™ aims to support healthier chatbot engagement and informed reflection on your digital interaction patterns.",
   "version": "1.0",
+
   "permissions": ["storage"],
   "host_permissions": [
     "https://chat.openai.com/*",
-    "https://chatgpt.com/*"
+    "https://chatgpt.com/*",
+    "https://claude.ai/*",
+    "https://gemini.google.com/*",
+    "https://copilot.microsoft.com/*"
   ],
   "action": {
     "default_popup": "dashboard.html",
@@ -27,7 +31,10 @@
     {
       "matches": [
         "https://chat.openai.com/*",
-        "https://chatgpt.com/*"
+        "https://chatgpt.com/*",
+        "https://claude.ai/*",
+        "https://gemini.google.com/*",
+        "https://copilot.microsoft.com/*"
       ],
       "js": ["content.js"]
     }
