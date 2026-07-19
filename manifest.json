@@ -4,28 +4,36 @@
   "description": "Designed as a self-awareness and early-warning system, Sentinel™ aims to support healthier chatbot engagement and informed reflection on your digital interaction patterns.",
   "version": "1.0",
 
-  "permissions": ["storage"],
+  "permissions": ["storage", "offscreen"],
+  "background": {
+    "service_worker": "sentiment-worker.js",
+    "type": "module"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  },
   "host_permissions": [
     "https://chat.openai.com/*",
     "https://chatgpt.com/*",
     "https://claude.ai/*",
     "https://gemini.google.com/*",
-    "https://copilot.microsoft.com/*"
+    "https://copilot.microsoft.com/*",
+    "https://huggingface.co/*"
   ],
   "action": {
     "default_popup": "dashboard.html",
     "default_icon": {
-      "16": "logo2.png",
-      "32": "logo2.png",
-      "48": "logo2.png",
-      "128": "logo2.png"
+      "16": "logo.png",
+      "32": "logo.png",
+      "48": "logo.png",
+      "128": "logo.png"
     }
   },
   "icons": {
-    "16": "logo2.png",
-    "32": "logo2.png",
-    "48": "logo2.png",
-    "128": "logo2.png"
+    "16": "logo.png",
+    "32": "logo.png",
+    "48": "logo.png",
+    "128": "logo.png"
   },
   "content_scripts": [
     {
@@ -36,7 +44,10 @@
         "https://gemini.google.com/*",
         "https://copilot.microsoft.com/*"
       ],
-      "js": ["content.js"]
+      "js": [
+        "chat-monitor.js",
+        "sentiment-chat-colors.js"
+      ]
     }
   ]
 }
