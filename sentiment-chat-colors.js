@@ -2,6 +2,7 @@
   "use strict";
 
   const STORAGE_KEY = "sentimentConversations";
+  const PREFERENCES_KEY = "visualizationPreferences";
   const ATTRIBUTE = "data-sentinel-sentiment-tone";
   const STYLE_ID = "sentinel-sentiment-chat-colors";
   const STRONGLY_POSITIVE_THRESHOLD = 0.65;
@@ -18,7 +19,7 @@
     const style = document.createElement("style");
     style.id = STYLE_ID;
     style.textContent = `
-      a[${ATTRIBUTE}] {
+      nav a[${ATTRIBUTE}] {
         border-left: 4px solid var(--sentinel-chat-tone-border) !important;
         background: var(--sentinel-chat-tone-background) !important;
         transition: background-color 160ms ease, border-color 160ms ease !important;
@@ -89,6 +90,22 @@
     }
   }
 
+  function isChatHistoryLink(link) {
+    return Boolean(
+      link instanceof HTMLAnchorElement &&
+      link.closest("nav") &&
+      !link.closest('[role="dialog"]') &&
+      getConversationKeyFromLink(link)
+    );
+  }
+
+  function clearChatColor(link) {
+    link.removeAttribute(ATTRIBUTE);
+    link.removeAttribute("data-sentinel-sentiment-score");
+    link.style.removeProperty("--sentinel-chat-tone-background");
+    link.style.removeProperty("--sentinel-chat-tone-border");
+  }
+
   async function sha256Fingerprint(value) {
     const bytes = new TextEncoder().encode(value);
     const digest = await crypto.subtle.digest("SHA-256", bytes);
@@ -104,9 +121,22 @@
 
   async function refreshChatColors() {
     const sequence = ++refreshSequence;
-    const stored = await getLocalStorage([STORAGE_KEY]);
+    const stored = await getLocalStorage([STORAGE_KEY, PREFERENCES_KEY]);
     const conversations = stored[STORAGE_KEY] || {};
-    const links = Array.from(document.querySelectorAll('a[href*="/c/"]'));
+    const chatColorsEnabled = stored[PREFERENCES_KEY]?.chatColors !== false;
+    const allCandidateLinks = Array.from(document.querySelectorAll(
+      `a[href*="/c/"], a[${ATTRIBUTE}]`
+    ));
+    const links = allCandidateLinks.filter(isChatHistoryLink);
+
+    allCandidateLinks
+      .filter(link => !isChatHistoryLink(link))
+      .forEach(clearChatColor);
+
+    if (!chatColorsEnabled) {
+      links.forEach(clearChatColor);
+      return;
+    }
 
     const assignments = await Promise.all(links.map(async link => {
       const conversationKey = getConversationKeyFromLink(link);
@@ -128,10 +158,7 @@
 
     assignments.forEach(({ link, tone, averageScore, color }) => {
       if (!tone) {
-        link.removeAttribute(ATTRIBUTE);
-        link.removeAttribute("data-sentinel-sentiment-score");
-        link.style.removeProperty("--sentinel-chat-tone-background");
-        link.style.removeProperty("--sentinel-chat-tone-border");
+        clearChatColor(link);
         return;
       }
       link.setAttribute(ATTRIBUTE, tone);
@@ -163,6 +190,9 @@
   observer.observe(document.body, { childList: true, subtree: true });
 
   chrome.storage.onChanged.addListener((changes, areaName) => {
-    if (areaName === "local" && changes[STORAGE_KEY]) scheduleRefresh();
+    if (
+      areaName === "local" &&
+      (changes[STORAGE_KEY] || changes[PREFERENCES_KEY])
+    ) scheduleRefresh();
   });
 })();

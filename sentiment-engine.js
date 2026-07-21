@@ -19,6 +19,13 @@ env.backends.onnx.wasm.wasmPaths = {
 
 let classifierPromise;
 let lastProgressBucket = -1;
+const MAX_EXPLANATION_WORDS = 20;
+const EXPLANATION_STOP_WORDS = new Set([
+  "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from",
+  "had", "has", "have", "he", "her", "his", "i", "in", "is", "it", "its",
+  "me", "my", "of", "on", "or", "our", "she", "so", "that", "the", "their",
+  "them", "they", "this", "to", "was", "we", "were", "with", "you", "your"
+]);
 
 function reportModelProgress(event) {
   if (event?.status === "progress" && Number.isFinite(event.progress)) {
@@ -76,6 +83,88 @@ function normalizePrediction(prediction) {
   };
 }
 
+function predictionList(output) {
+  if (!Array.isArray(output)) return output ? [output] : [];
+  if (output.length === 1 && Array.isArray(output[0])) return output[0];
+  return output;
+}
+
+function getLabelProbability(output, label) {
+  const match = predictionList(output).find(
+    prediction => String(prediction?.label || "").toLowerCase() === label
+  );
+  return Number(match?.score || 0);
+}
+
+function getWordCandidates(text) {
+  const matches = Array.from(text.matchAll(/[\p{L}\p{N}][\p{L}\p{N}'’_-]*/gu))
+    .map(match => ({
+      word: match[0],
+      start: match.index,
+      end: match.index + match[0].length
+    }))
+    .filter(candidate =>
+      candidate.word.length > 1 &&
+      !EXPLANATION_STOP_WORDS.has(candidate.word.toLowerCase())
+    );
+
+  if (matches.length <= MAX_EXPLANATION_WORDS) return matches;
+  return Array.from({ length: MAX_EXPLANATION_WORDS }, (_, index) => {
+    const matchIndex = Math.round(index * (matches.length - 1) / (MAX_EXPLANATION_WORDS - 1));
+    return matches[matchIndex];
+  }).filter((candidate, index, candidates) =>
+    index === 0 || candidate.start !== candidates[index - 1].start
+  );
+}
+
+function removeCandidate(text, candidate) {
+  return `${text.slice(0, candidate.start)} ${text.slice(candidate.end)}`
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+async function analyzeWithWordInfluence(classifier, text) {
+  const baseOutput = await classifier(text, { top_k: null, truncation: true });
+  const basePredictions = predictionList(baseOutput)
+    .slice()
+    .sort((a, b) => Number(b.score || 0) - Number(a.score || 0));
+  const topPrediction = basePredictions[0];
+  const sentiment = normalizePrediction(topPrediction);
+  const candidates = getWordCandidates(text);
+
+  if (!candidates.length) return { sentiment, influentialWord: null };
+
+  const variants = candidates.map(candidate => removeCandidate(text, candidate));
+  const variantOutputs = await classifier(variants, { top_k: null, truncation: true });
+  const outputs = Array.isArray(variantOutputs) && Array.isArray(variantOutputs[0])
+    ? variantOutputs
+    : [variantOutputs];
+  const baseProbability = getLabelProbability(basePredictions, sentiment.label);
+
+  const ranked = candidates.map((candidate, index) => ({
+    ...candidate,
+    influence: baseProbability - getLabelProbability(outputs[index], sentiment.label)
+  })).sort((a, b) => b.influence - a.influence);
+  const strongest = ranked[0];
+
+  if (!strongest || strongest.influence <= 0.005) {
+    return { sentiment, influentialWord: null };
+  }
+
+  const previousText = text.slice(0, strongest.start).toLowerCase();
+  const escapedWord = strongest.word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const previousMatches = previousText.match(new RegExp(escapedWord, "giu")) || [];
+
+  return {
+    sentiment,
+    influentialWord: {
+      word: strongest.word,
+      occurrence: previousMatches.length,
+      influence: Number(strongest.influence.toFixed(3))
+    }
+  };
+}
+
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (
     message?.target !== "sentinel-offscreen" ||
@@ -91,14 +180,20 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   // The raw prompt is used only for this inference call and is never persisted.
   console.info("Sentinel sentiment analysis: processing locally");
   getClassifier()
-    .then(classifier => classifier(text, { top_k: 1 }))
-    .then(output => {
+    .then(async classifier => {
+      if (message.explain === true) {
+        return analyzeWithWordInfluence(classifier, text);
+      }
+      const output = await classifier(text, { top_k: 1, truncation: true });
       const prediction = Array.isArray(output) ? output[0] : output;
-      const sentiment = normalizePrediction(prediction);
+      return { sentiment: normalizePrediction(prediction), influentialWord: null };
+    })
+    .then(result => {
+      const { sentiment, influentialWord } = result;
       console.info(
         `Sentinel sentiment result: ${sentiment.label} (${sentiment.confidence})`
       );
-      sendResponse({ ok: true, sentiment });
+      sendResponse({ ok: true, sentiment, influentialWord });
     })
     .catch(error => {
       console.error("Sentinel offscreen sentiment analysis failed:", error);

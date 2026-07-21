@@ -6,10 +6,6 @@ let currentExportData = null;
 
 const canvas = document.getElementById("chart");
 const ctx = canvas.getContext("2d");
-const chartArea = document.querySelector(".chart-area");
-const insightsPanel = document.getElementById("insightsPanel");
-const toneCanvas = document.getElementById("toneTimeline");
-const toneCtx = toneCanvas.getContext("2d");
 
 canvas.width = 348;
 canvas.height = 220;
@@ -30,7 +26,6 @@ function applyTheme(theme) {
   if (currentView === "Weekly") loadWeekly();
   if (currentView === "Monthly") loadMonthly();
   if (currentView === "Session") loadSession();
-  if (currentView === "Insights") loadInsights();
 }
 
 // toggle theme and save preference
@@ -50,7 +45,7 @@ function toggleDailyAverage(show) {
 
 // update active state of nav buttons
 function setActiveButton(view) {
-  ["weekly", "monthly", "session", "insights"].forEach(id => {
+  ["weekly", "monthly", "session"].forEach(id => {
     document.getElementById(id).classList.remove("active");
   });
   document.getElementById(view.toLowerCase()).classList.add("active");
@@ -59,11 +54,6 @@ function setActiveButton(view) {
 function setStatLabels(total, secondary) {
   document.getElementById("totalLabel").textContent = total;
   document.getElementById("avgLabel").textContent = secondary;
-}
-
-function showInsightsPanel(show) {
-  chartArea.style.display = show ? "none" : "block";
-  insightsPanel.style.display = show ? "block" : "none";
 }
 
 // helper to format date as the universal format
@@ -179,133 +169,6 @@ function renderWordCloud(wordData) {
   });
 }
 
-function percentage(count, total) {
-  return total ? Number(((count / total) * 100).toFixed(1)) : 0;
-}
-
-function dominantSentiment(sentiment) {
-  const counts = {
-    positive: Number(sentiment?.positive || 0),
-    neutral: Number(sentiment?.neutral || 0),
-    negative: Number(sentiment?.negative || 0)
-  };
-  const highest = Math.max(...Object.values(counts));
-  if (!highest) return "None";
-  const leaders = Object.entries(counts).filter(([, value]) => value === highest);
-  return leaders.length === 1
-    ? leaders[0][0][0].toUpperCase() + leaders[0][0].slice(1)
-    : "Mixed";
-}
-
-function renderSentimentDistribution(sentiment) {
-  const messages = Number(sentiment?.messages || 0);
-  const values = {
-    positive: percentage(Number(sentiment?.positive || 0), messages),
-    neutral: percentage(Number(sentiment?.neutral || 0), messages),
-    negative: percentage(Number(sentiment?.negative || 0), messages)
-  };
-
-  ["positive", "neutral", "negative"].forEach(label => {
-    document.getElementById(`${label}Segment`).style.width = `${values[label]}%`;
-    document.getElementById(`${label}Legend`).textContent =
-      `${label[0].toUpperCase() + label.slice(1)} ${values[label]}%`;
-  });
-}
-
-function tonePointColor(score) {
-  if (score > 0.15) return "#34c759";
-  if (score >= -0.15) return "#8e8e93";
-  if (score > -0.40) return "#ffcc00";
-  if (score > -0.65) return "#ff9500";
-  return "#ff3b30";
-}
-
-function renderToneTimeline(timeline) {
-  const points = Array.isArray(timeline) ? timeline.slice(-30) : [];
-  toneCtx.clearRect(0, 0, toneCanvas.width, toneCanvas.height);
-
-  const padX = 14;
-  const padY = 13;
-  const width = toneCanvas.width - padX * 2;
-  const height = toneCanvas.height - padY * 2;
-
-  toneCtx.strokeStyle = getComputedStyle(document.documentElement)
-    .getPropertyValue("--separator");
-  toneCtx.setLineDash([4, 4]);
-  toneCtx.beginPath();
-  toneCtx.moveTo(padX, padY + height / 2);
-  toneCtx.lineTo(padX + width, padY + height / 2);
-  toneCtx.stroke();
-  toneCtx.setLineDash([]);
-
-  if (!points.length) {
-    toneCtx.fillStyle = "#8e8e93";
-    toneCtx.font = "12px -apple-system, sans-serif";
-    toneCtx.textAlign = "center";
-    toneCtx.fillText("No sentiment data", toneCanvas.width / 2, toneCanvas.height / 2 + 4);
-    document.getElementById("toneSummary").textContent = "No analysed prompts in this conversation.";
-    return;
-  }
-
-  const plotted = points.map((point, index) => ({
-    x: points.length === 1 ? toneCanvas.width / 2 : padX + (index / (points.length - 1)) * width,
-    y: padY + ((1 - Math.max(-1, Math.min(1, Number(point.score || 0)))) / 2) * height,
-    score: Number(point.score || 0)
-  }));
-
-  if (plotted.length > 1) {
-    const gradient = toneCtx.createLinearGradient(padX, 0, padX + width, 0);
-    plotted.forEach((point, index) => {
-      gradient.addColorStop(index / (plotted.length - 1), tonePointColor(point.score));
-    });
-    toneCtx.beginPath();
-    toneCtx.moveTo(plotted[0].x, plotted[0].y);
-    plotted.slice(1).forEach(point => toneCtx.lineTo(point.x, point.y));
-    toneCtx.strokeStyle = gradient;
-    toneCtx.lineWidth = 2.5;
-    toneCtx.stroke();
-  }
-
-  plotted.forEach(point => {
-    toneCtx.beginPath();
-    toneCtx.arc(point.x, point.y, 3.5, 0, Math.PI * 2);
-    toneCtx.fillStyle = tonePointColor(point.score);
-    toneCtx.fill();
-  });
-
-  const first = plotted[0].score;
-  const latest = plotted[plotted.length - 1].score;
-  const difference = latest - first;
-  const description = plotted.length === 1
-    ? "One analysed prompt — more data is needed to describe a change."
-    : difference >= 0.15
-      ? "The later prompts use more positive language than the first prompt."
-      : difference <= -0.15
-        ? "The later prompts use more negative language than the first prompt."
-        : "The overall prompt tone appears relatively stable.";
-  document.getElementById("toneSummary").textContent = description;
-}
-
-function loadInsights() {
-  currentView = "Insights";
-  setActiveButton("Insights");
-  showInsightsPanel(true);
-  toggleDailyAverage(true);
-  setStatLabels("Prompts", "Dominant");
-  document.getElementById("dashboardTitle").textContent = "AI Mirror Insights";
-  document.querySelector(".week-nav").style.display = "none";
-  document.getElementById("periodLabel").textContent = "Current conversation";
-
-  chrome.storage.local.get(["activeSession"], res => {
-    const sentiment = res.activeSession?.sentiment || null;
-    document.getElementById("totalCount").textContent = Number(sentiment?.messages || 0);
-    document.getElementById("avgCount").textContent = dominantSentiment(sentiment);
-    renderSentimentDistribution(sentiment);
-    renderToneTimeline(sentiment?.timeline || []);
-    currentExportData = { type: "insights", rows: [] };
-  });
-}
-
 // calculate the current week's date range based on the offset, 
 // return arrays of day labels and dates for graphing
 function getCurrentWeek(offset = 0) {
@@ -345,7 +208,6 @@ function getCurrentWeek(offset = 0) {
 function loadWeekly() {
   currentView = "Weekly";
   setActiveButton("Weekly");
-  showInsightsPanel(false);
   setStatLabels("Total", "Daily Avg");
   document.getElementById("dashboardTitle").textContent = "Trigger Trends";
   toggleDailyAverage(true);
@@ -404,7 +266,6 @@ function getCurrentMonth(offset = 0) {
 function loadMonthly() {
   currentView = "Monthly";
   setActiveButton("Monthly");
-  showInsightsPanel(false);
   setStatLabels("Total", "Daily Avg");
   document.getElementById("dashboardTitle").textContent = "Trigger Trends";
   toggleDailyAverage(true);
@@ -431,7 +292,6 @@ function loadMonthly() {
 function loadSession() {
   currentView = "Session";
   setActiveButton("Session");
-  showInsightsPanel(false);
   setStatLabels("Total", "Daily Avg");
   document.getElementById("dashboardTitle").textContent = "Trigger Trends";
   toggleDailyAverage(false);
@@ -774,15 +634,6 @@ document.getElementById("pdf").addEventListener("click", exportPDF);
 document.getElementById("weekly").onclick = () => { weekOffset = 0; loadWeekly(); };
 document.getElementById("monthly").onclick = () => { monthOffset = 0; loadMonthly(); };
 document.getElementById("session").onclick = () => { loadSession(); };
-document.getElementById("insights").onclick = () => { loadInsights(); };
-
-chrome.storage.onChanged.addListener((changes, areaName) => {
-  if (
-    areaName === "local" &&
-    currentView === "Insights" &&
-    changes.activeSession
-  ) loadInsights();
-});
 
 document.getElementById("prevWeek").onclick = () => {
   if (currentView === "Weekly") { weekOffset++; loadWeekly(); }

@@ -223,75 +223,6 @@ h2 {
   display: block;
 }
 
-.insights-panel {
-  display: none;
-  padding: 16px 20px 20px;
-  color: var(--label);
-}
-
-.insight-section + .insight-section {
-  margin-top: 20px;
-}
-
-.insight-title {
-  font-size: 12px;
-  font-weight: 700;
-  color: var(--label);
-  margin-bottom: 9px;
-}
-
-.insight-subtitle {
-  font-size: 11px;
-  color: var(--secondary);
-  margin-top: 5px;
-}
-
-.stacked-bar {
-  display: flex;
-  width: 100%;
-  height: 14px;
-  overflow: hidden;
-  border-radius: 999px;
-  background: var(--control-bg);
-}
-
-.stacked-bar span {
-  width: 0;
-  transition: width 300ms ease;
-}
-
-.sentiment-positive { background: #34c759; }
-.sentiment-neutral { background: #8e8e93; }
-.sentiment-negative { background: linear-gradient(90deg, #ffcc00, #ff3b30); }
-.legend-row {
-  display: flex;
-  justify-content: space-between;
-  gap: 8px;
-  margin-top: 7px;
-  font-size: 10px;
-  color: var(--secondary);
-}
-
-.legend-item {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.legend-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-}
-
-#toneTimeline {
-  width: 100%;
-  height: 96px;
-  display: block;
-  border-radius: 12px;
-  background: var(--control-bg);
-}
-
 </style>
 </head>
 
@@ -332,7 +263,6 @@ h2 {
     <button id="weekly" class="active">Weekly</button>
     <button id="monthly">Monthly</button>
     <button id="session">Session</button>
-    <button id="insights">Insights</button>
   </div>
 </div>
 
@@ -344,29 +274,6 @@ h2 {
 
 <div class="chart-area">
   <canvas id="chart"></canvas>
-</div>
-
-<div class="insights-panel" id="insightsPanel">
-  <div class="insight-section">
-    <div class="insight-title">Prompt sentiment</div>
-    <div class="stacked-bar" aria-label="Sentiment distribution">
-      <span class="sentiment-positive" id="positiveSegment"></span>
-      <span class="sentiment-neutral" id="neutralSegment"></span>
-      <span class="sentiment-negative" id="negativeSegment"></span>
-    </div>
-    <div class="legend-row">
-      <span class="legend-item"><i class="legend-dot sentiment-positive"></i><span id="positiveLegend">Positive 0%</span></span>
-      <span class="legend-item"><i class="legend-dot sentiment-neutral"></i><span id="neutralLegend">Neutral 0%</span></span>
-      <span class="legend-item"><i class="legend-dot sentiment-negative"></i><span id="negativeLegend">Negative 0%</span></span>
-    </div>
-  </div>
-
-  <div class="insight-section">
-    <div class="insight-title">Tone through this conversation</div>
-    <canvas id="toneTimeline" width="340" height="96"></canvas>
-    <div class="insight-subtitle" id="toneSummary">Not enough sentiment data yet.</div>
-  </div>
-
 </div>
 
 </div>

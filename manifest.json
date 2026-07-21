@@ -46,7 +46,8 @@
       ],
       "js": [
         "chat-monitor.js",
-        "sentiment-chat-colors.js"
+        "sentiment-chat-colors.js",
+        "visualization-controls.js"
       ]
     }
   ]

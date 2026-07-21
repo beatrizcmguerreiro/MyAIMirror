@@ -2,6 +2,9 @@ console.log("SENTINEL: running");
 
 // triggers
 // TODO: move to separate file 
+// Kept for possible future use, but disabled while Sentinel focuses on
+// reflective features rather than manual safety-keyword monitoring.
+const MANUAL_TRIGGERS_ENABLED = false;
 const TRIGGERS = {
   words: ["suicide", "self-harm"],
   phrases: ["kill myself", "end my life"]
@@ -51,6 +54,8 @@ function getMiniMapText(message) {
 }
 
 function getTriggerPatterns(terms = []) {
+  if (!MANUAL_TRIGGERS_ENABLED) return [];
+
   const wantedTerms = new Set(terms.map(term => term.toLowerCase()));
   const includeTerm = term => !wantedTerms.size || wantedTerms.has(term.toLowerCase());
 
@@ -62,6 +67,20 @@ function getTriggerPatterns(terms = []) {
       .filter(includeTerm)
       .map(term => ({ term, regex: new RegExp(`\\b${escapeRegex(term)}\\b`, "gi") }))
   ].sort((a, b) => b.term.length - a.term.length);
+}
+
+function removeManualTriggerUi() {
+  document.querySelectorAll(".tms-highlighted-trigger").forEach(highlight => {
+    const parent = highlight.parentNode;
+    highlight.replaceWith(document.createTextNode(highlight.textContent || ""));
+    parent?.normalize();
+  });
+  document
+    .querySelectorAll('[data-message-author-role="user"][data-highlighted]')
+    .forEach(message => message.removeAttribute("data-highlighted"));
+  document.getElementById("tms-risk-bar")?.remove();
+  document.getElementById("tms-trigger-popup")?.remove();
+  document.getElementById("tms-risk-style")?.remove();
 }
 
 function tmsHash(str) {
@@ -181,6 +200,12 @@ function isNearPageTop() {
 }
 
 function shouldCountLiveMessage(msg, key) {
+  const normalizedTextHash = tmsHash(normalizeMessageText(msg?.innerText));
+  if (
+    pendingNewChatPromptHash &&
+    normalizedTextHash === pendingNewChatPromptHash
+  ) return true;
+
   if (!isNearPageBottom()) return false;
   if (!initialScanComplete && !allowFirstVisibleUserCount) return false;
 
@@ -565,6 +590,7 @@ const historyLoadedConversations = new Set();
 let activeScrollContainer = null;
 let miniMapBuildComplete = false;
 let allowFirstVisibleUserCount = false;
+let pendingNewChatPromptHash = null;
 let staleConversationSignature = null;
 let conversationRestorePromise = Promise.resolve();
 function getRiskColor(hits) {
@@ -679,17 +705,21 @@ function ensureRiskBar() {
       height: 100vh;
       background: linear-gradient(
         180deg,
-        rgba(58,58,58,0.74),
-        rgba(68,68,68,0.68)
+        rgba(248,248,248,0.94),
+        rgba(235,235,235,0.90)
       );
-      border-left: 1px solid rgba(0,0,0,0.14);
+      border-left: 1px solid rgba(0,0,0,0.08);
       border-top: 0;
       border-radius: 0;
-      box-shadow: inset 1px 0 0 rgba(255,255,255,0.05);
-      z-index: 999998;
+      box-shadow: inset 1px 0 0 rgba(255,255,255,0.65);
+      /* Keep the minimap above chat content, but below ChatGPT menus/dialogs. */
+      z-index: 10;
       pointer-events: auto;
       overflow: hidden;
       backdrop-filter: blur(2px);
+    }
+    html[data-sentinel-hide-trigger-minimap] #tms-risk-bar {
+      display: none !important;
     }
     #tms-risk-bar::before {
       content: "";
@@ -701,7 +731,7 @@ function ensureRiskBar() {
           to bottom,
           transparent 0,
           transparent 9px,
-          rgba(255,255,255,0.08) 10px
+          rgba(0,0,0,0.035) 10px
         );
       pointer-events: none;
     }
@@ -718,7 +748,7 @@ function ensureRiskBar() {
       height: 2px;
       margin-bottom: 0;
       overflow: hidden;
-      color: #f0f0f0;
+      color: #686868;
       font: 500 3.65px/3.65px Consolas, "SF Mono", Menlo, monospace;
       letter-spacing: 0;
       white-space: nowrap;
@@ -727,33 +757,28 @@ function ensureRiskBar() {
       opacity: 1;
     }
     .tms-mini-line[data-role="user"] {
-      color: #00d8ff;
+      color: #007f9f;
       font-weight: 700;
-      text-shadow: 0 0 3px rgba(0,216,255,0.5);
+      text-shadow: none;
     }
     .tms-mini-line[data-role="assistant"] {
-      color: #e8e4dc;
+      color: #707070;
     }
     .tms-mini-line[data-role="unknown"] {
-      color: #e4e4e4;
+      color: #808080;
     }
     #tms-risk-viewport {
       position: absolute;
       left: 0;
       right: 0;
       min-height: 42px;
-      background: rgba(255,255,255,0.07);
+      background: rgba(0,0,0,0.025);
       border-top: 0;
       border-bottom: 0;
       pointer-events: none;
       z-index: 2;
       opacity: 0;
-      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.09);
-      transition: opacity 0.14s ease, background 0.14s ease;
-    }
-    #tms-risk-bar:hover #tms-risk-viewport {
-      opacity: 0.9;
-      background: rgba(255,255,255,0.13);
+      box-shadow: inset 0 0 0 1px rgba(0,0,0,0.07);
     }
     .tms-risk-marker {
       position: absolute;
@@ -782,9 +807,6 @@ function ensureRiskBar() {
       height: 2px;
       background: var(--tms-marker-line-color, #30d158);
       box-shadow: 0 0 5px var(--tms-marker-line-glow, rgba(48,209,88,0.42));
-    }
-    .tms-risk-marker:hover {
-      opacity: 1;
     }
     .tms-risk-focus {
       outline: 2px solid #ff3b30 !important;
@@ -2098,14 +2120,20 @@ async function processMessage(msg) {
   // IMPORTANT: de-dup survives re-renders.
   if (alreadyCounted) return;
 
-  // Mark before awaiting the local model so repeated DOM scans cannot count twice.
-  markCounted(key);
-
   if (shouldCountLiveMessage(msg, key)) {
     if (!isCanonicalConversationRoute()) {
+      // A newly submitted ChatGPT prompt appears in the DOM before ChatGPT
+      // assigns its permanent /c/<id> route. Keep it eligible for the next
+      // scan instead of marking it as processed under the temporary route.
+      pendingNewChatPromptHash = tmsHash(normalizeMessageText(msg.innerText));
       setTimeout(scan, 250);
       return;
     }
+
+    // Mark only after the permanent conversation identity exists. This keeps
+    // repeated scans from duplicating inference while allowing first prompts
+    // in brand-new chats to be analysed and persisted.
+    markCounted(key);
 
     await conversationRestorePromise;
     if (conversationKeyAtStart !== currentConversationKey) return;
@@ -2118,6 +2146,7 @@ async function processMessage(msg) {
       pendingSentimentFingerprints.has(pendingKey) ||
       await hasPersistedSentimentMessage(conversationId, messageFingerprint)
     ) {
+      pendingNewChatPromptHash = null;
       allowFirstVisibleUserCount = false;
       return;
     }
@@ -2133,7 +2162,10 @@ async function processMessage(msg) {
           messageFingerprint,
           sentiment
         );
-        if (!persisted) return;
+        if (!persisted) {
+          pendingNewChatPromptHash = null;
+          return;
+        }
       }
 
       if (conversationKeyAtStart !== currentConversationKey) return;
@@ -2145,12 +2177,17 @@ async function processMessage(msg) {
         sentiment
       );
       if (result.hits > 0) applyRiskMarkerVisualByKey(key, sessionTotalHits);
+      pendingNewChatPromptHash = null;
       allowFirstVisibleUserCount = false;
     } catch (error) {
       console.error("Sentinel could not store conversation analysis:", error);
     } finally {
       pendingSentimentFingerprints.delete(pendingKey);
     }
+  } else {
+    // Existing/history messages are not live prompts, but should still be
+    // remembered so later DOM re-renders do not treat them as new submissions.
+    markCounted(key);
   }
 }
 
@@ -2167,6 +2204,7 @@ function scan() {
     // Only the empty New Chat screen may later reveal a genuinely new first
     // prompt. Empty DOM states on /c/<id> are ordinary navigation/loading.
     allowFirstVisibleUserCount = isEmptyChatGptNewChatRoute();
+    if (allowFirstVisibleUserCount) pendingNewChatPromptHash = null;
     if (miniMapEntries.size || riskMarkers.size) clearConversationState(false);
     return;
   }
@@ -2210,6 +2248,7 @@ const observer = new MutationObserver(mutations => {
 });
 
 observer.observe(document.body, { childList: true, subtree: true });
+if (!MANUAL_TRIGGERS_ENABLED) removeManualTriggerUi();
 ensureRiskBar();
 conversationRestorePromise = restoreConversationSentiment(currentConversationKey);
 scan();

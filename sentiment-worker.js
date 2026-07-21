@@ -32,12 +32,13 @@ async function ensureOffscreenDocument() {
   await creatingOffscreenDocument;
 }
 
-async function analyzeWithOffscreenModel(text) {
+async function analyzeWithOffscreenModel(text, explain = false) {
   await ensureOffscreenDocument();
   return chrome.runtime.sendMessage({
     target: "sentinel-offscreen",
     type: "sentinel:run-sentiment",
-    text
+    text,
+    explain
   });
 }
 
@@ -50,7 +51,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return false;
   }
 
-  analyzeWithOffscreenModel(text)
+  analyzeWithOffscreenModel(text, message.explain === true)
     .then(sendResponse)
     .catch(error => {
       console.error("Sentinel could not start the local sentiment engine:", error);
