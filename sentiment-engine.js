@@ -5,6 +5,31 @@ const MODEL_METHOD = "cardiff-twitter-roberta-sentiment-latest";
 const MODEL_REVISION = "f3ec4d0925f90c3ca7ee7814f52d6ee7cf180445";
 const MODEL_VERSION = `${MODEL_REVISION}-q8`;
 
+const INTENT_MODEL_ID = "Xenova/nli-deberta-v3-xsmall";
+const INTENT_MODEL_METHOD = "deberta-v3-xsmall-zero-shot-intent";
+const INTENT_MODEL_REVISION = "2a4f614a701367a02d51389039afc998faeda637";
+const INTENT_MODEL_VERSION = `${INTENT_MODEL_REVISION}-q8-v1`;
+const INTENT_THRESHOLD = 0.5;
+const MODEL_MAX_TOKENS = 512;
+const INTENT_LABELS = [
+  {
+    key: "learning",
+    description: "to learn, understand, or receive an explanation"
+  },
+  {
+    key: "delegation",
+    description: "to delegate the production of a complete result to the AI"
+  },
+  {
+    key: "reasoning",
+    description: "to present their own reasoning, attempt, interpretation, or opinion"
+  },
+  {
+    key: "criticalEngagement",
+    description: "to critically question, verify, compare, or correct information"
+  }
+];
+
 // The model is downloaded once and cached by the browser. Only model assets are
 // fetched remotely; prompts are processed by the model locally on the device.
 env.allowLocalModels = false;
@@ -19,6 +44,8 @@ env.backends.onnx.wasm.wasmPaths = {
 
 let classifierPromise;
 let lastProgressBucket = -1;
+let intentClassifierPromise;
+let lastIntentProgressBucket = -1;
 const MAX_EXPLANATION_WORDS = 20;
 const EXPLANATION_STOP_WORDS = new Set([
   "a", "an", "and", "are", "as", "at", "be", "but", "by", "for", "from",
@@ -26,6 +53,20 @@ const EXPLANATION_STOP_WORDS = new Set([
   "me", "my", "of", "on", "or", "our", "she", "so", "that", "the", "their",
   "them", "they", "this", "to", "was", "we", "were", "with", "you", "your"
 ]);
+
+function enforceTokenizerLimit(classifier) {
+  const tokenizer = classifier?.tokenizer;
+  if (!tokenizer) return classifier;
+
+  // Some converted model revisions omit model_max_length from their tokenizer
+  // metadata. In that case Transformers.js treats the limit as Infinity, even
+  // though RoBERTa/DeBERTa ONNX graphs accept at most 512 tokens. Supplying the
+  // real ceiling here makes the pipelines' existing `truncation: true` safe.
+  if (tokenizer._tokenizerConfig) {
+    tokenizer._tokenizerConfig.model_max_length = MODEL_MAX_TOKENS;
+  }
+  return classifier;
+}
 
 function reportModelProgress(event) {
   if (event?.status === "progress" && Number.isFinite(event.progress)) {
@@ -48,9 +89,11 @@ function getClassifier() {
     classifierPromise = pipeline("text-classification", MODEL_ID, {
       dtype: "q8",
       device: "wasm",
+      session_options: { executionProviders: ["wasm"] },
       revision: MODEL_REVISION,
       progress_callback: reportModelProgress
     }).then(classifier => {
+      enforceTokenizerLimit(classifier);
       console.info("Sentinel sentiment model: ready");
       return classifier;
     }).catch(error => {
@@ -61,6 +104,86 @@ function getClassifier() {
   return classifierPromise;
 }
 
+function reportIntentModelProgress(event) {
+  if (event?.status === "progress" && Number.isFinite(event.progress)) {
+    const bucket = Math.floor(event.progress / 10) * 10;
+    if (bucket !== lastIntentProgressBucket) {
+      lastIntentProgressBucket = bucket;
+      console.info(`Sentinel intention model download: ${bucket}%`);
+    }
+    return;
+  }
+
+  if (["initiate", "ready", "done"].includes(event?.status)) {
+    console.info(`Sentinel intention model: ${event.status}`);
+  }
+}
+
+function getIntentClassifier() {
+  if (!intentClassifierPromise) {
+    console.info("Sentinel intention model: loading");
+    intentClassifierPromise = pipeline(
+      "zero-shot-classification",
+      INTENT_MODEL_ID,
+      {
+        dtype: "q8",
+        device: "wasm",
+        session_options: { executionProviders: ["wasm"] },
+        revision: INTENT_MODEL_REVISION,
+        progress_callback: reportIntentModelProgress
+      }
+    ).then(classifier => {
+      enforceTokenizerLimit(classifier);
+      console.info("Sentinel intention model: ready");
+      return classifier;
+    }).catch(error => {
+      intentClassifierPromise = undefined;
+      throw error;
+    });
+  }
+  return intentClassifierPromise;
+}
+
+function normalizeIntentResult(output) {
+  const scoreByDescription = new Map(
+    (output?.labels || []).map((label, index) => [
+      String(label),
+      Number(output?.scores?.[index] || 0)
+    ])
+  );
+  const scores = Object.fromEntries(
+    INTENT_LABELS.map(({ key, description }) => [
+      key,
+      Number((scoreByDescription.get(description) || 0).toFixed(3))
+    ])
+  );
+  const labels = INTENT_LABELS
+    .filter(({ key }) => scores[key] >= INTENT_THRESHOLD)
+    .map(({ key }) => key);
+
+  return {
+    labels,
+    summary: labels.length === 0
+      ? "unclear"
+      : labels.length > 1
+        ? "mixed"
+        : labels[0],
+    scores,
+    threshold: INTENT_THRESHOLD,
+    method: INTENT_MODEL_METHOD,
+    version: INTENT_MODEL_VERSION
+  };
+}
+
+async function analyzeIntent(classifier, text) {
+  const descriptions = INTENT_LABELS.map(label => label.description);
+  const output = await classifier(text, descriptions, {
+    hypothesis_template: "The user's intention is {}.",
+    multi_label: true
+  });
+  return normalizeIntentResult(output);
+}
+
 function normalizePrediction(prediction) {
   const label = String(prediction.label || "").toLowerCase();
   if (!new Set(["positive", "neutral", "negative"]).has(label)) {
@@ -68,16 +191,10 @@ function normalizePrediction(prediction) {
   }
 
   const probability = Number(prediction.score);
-  const signedScore = label === "positive"
-    ? probability
-    : label === "negative"
-      ? -probability
-      : 0;
 
   return {
     label,
-    score: Number(signedScore.toFixed(3)),
-    confidence: Number(probability.toFixed(3)),
+    score: Number(probability.toFixed(3)),
     method: MODEL_METHOD,
     version: MODEL_VERSION
   };
@@ -166,10 +283,25 @@ async function analyzeWithWordInfluence(classifier, text) {
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (
-    message?.target !== "sentinel-offscreen" ||
-    message?.type !== "sentinel:run-sentiment"
-  ) return false;
+  if (message?.target !== "sentinel-offscreen") return false;
+
+  if (message?.type === "sentinel:prewarm-models") {
+    console.info("Sentinel sentiment model: preparing for live prompt tone");
+    getClassifier()
+      .then(() => {
+        console.info("Sentinel sentiment model: ready for live prompt tone");
+        sendResponse({ ok: true });
+      })
+      .catch(error => {
+        console.warn("Sentinel sentiment model prewarming was interrupted:", error);
+        sendResponse({ ok: false, error: "local-model-unavailable" });
+      });
+    return true;
+  }
+
+  const isSentimentRequest = message?.type === "sentinel:run-sentiment";
+  const isIntentRequest = message?.type === "sentinel:run-intent";
+  if (!isSentimentRequest && !isIntentRequest) return false;
 
   const text = typeof message.text === "string" ? message.text.trim() : "";
   if (!text) {
@@ -178,6 +310,25 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   // The raw prompt is used only for this inference call and is never persisted.
+  if (isIntentRequest) {
+    console.info("Sentinel intention analysis: processing locally");
+    getIntentClassifier()
+      .then(classifier => analyzeIntent(classifier, text))
+      .then(intent => {
+        console.info("Sentinel intention result:", {
+          summary: intent.summary,
+          detectedCategories: intent.labels,
+          scores: intent.scores
+        });
+        sendResponse({ ok: true, intent });
+      })
+      .catch(error => {
+        console.error("Sentinel offscreen intention analysis failed:", error);
+        sendResponse({ ok: false, error: "local-intention-model-unavailable" });
+      });
+    return true;
+  }
+
   console.info("Sentinel sentiment analysis: processing locally");
   getClassifier()
     .then(async classifier => {
@@ -191,7 +342,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     .then(result => {
       const { sentiment, influentialWord } = result;
       console.info(
-        `Sentinel sentiment result: ${sentiment.label} (${sentiment.confidence})`
+        `Sentinel sentiment result: ${sentiment.label} (${sentiment.score})`
       );
       sendResponse({ ok: true, sentiment, influentialWord });
     })

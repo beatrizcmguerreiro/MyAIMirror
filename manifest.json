@@ -1,10 +1,10 @@
 {
   "manifest_version": 3,
-  "name": "Sentinel - Reflective Awareness Monitor",
+  "name": "My AI Mirror - Reflective Awareness Monitor",
   "description": "Designed as a self-awareness and early-warning system, Sentinel™ aims to support healthier chatbot engagement and informed reflection on your digital interaction patterns.",
   "version": "1.0",
 
-  "permissions": ["storage", "offscreen"],
+  "permissions": ["storage", "offscreen", "scripting"],
   "background": {
     "service_worker": "sentiment-worker.js",
     "type": "module"
@@ -21,7 +21,6 @@
     "https://huggingface.co/*"
   ],
   "action": {
-    "default_popup": "dashboard.html",
     "default_icon": {
       "16": "logo.png",
       "32": "logo.png",
@@ -44,11 +43,7 @@
         "https://gemini.google.com/*",
         "https://copilot.microsoft.com/*"
       ],
-      "js": [
-        "chat-monitor.js",
-        "sentiment-chat-colors.js",
-        "visualization-controls.js"
-      ]
+      "js": ["theme-support.js", "privacy-consent.js"]
     }
   ]
 }

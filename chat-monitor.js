@@ -27,6 +27,23 @@ function normalizeMessageText(text) {
   return (text || "").replace(/\s+/g, " ").trim();
 }
 
+function isSentinelTemporarilyDisabled() {
+  return document.documentElement.hasAttribute("data-sentinel-temporary-chat");
+}
+
+function hasExtensionContext() {
+  try {
+    return Boolean(chrome.runtime?.id);
+  } catch {
+    return false;
+  }
+}
+
+function isExtensionContextInvalidated(error) {
+  return !hasExtensionContext() ||
+    /extension context invalidated/i.test(String(error?.message || error || ""));
+}
+
 function cleanMiniMapText(text) {
   return (text || "")
     .replace(/\r/g, "")
@@ -93,18 +110,55 @@ function tmsHash(str) {
   return (h >>> 0).toString(16);
 }
 
-const SENTIMENT_CONVERSATIONS_KEY = "sentimentConversations";
+const ANALYSIS_CONVERSATIONS_KEY = "conversationAnalysesV1";
 const SENTIMENT_METHOD = "cardiff-twitter-roberta-sentiment-latest";
 const SENTIMENT_VERSION = "f3ec4d0925f90c3ca7ee7814f52d6ee7cf180445-q8";
-let sentimentPersistenceQueue = Promise.resolve();
-const pendingSentimentFingerprints = new Set();
+const INTENT_LABEL_KEYS = [
+  "learning",
+  "delegation",
+  "reasoning",
+  "criticalEngagement"
+];
+let analysisPersistenceQueue = Promise.resolve();
+const pendingAnalysisKeys = new Set();
+let lastSuccessfulAnalysisSave = null;
 
 function getLocalStorage(keys) {
-  return new Promise(resolve => chrome.storage.local.get(keys, resolve));
+  return new Promise(resolve => {
+    try {
+      if (!chrome.runtime?.id) return resolve({});
+      chrome.storage.local.get(keys, result => {
+        if (chrome.runtime.lastError) return resolve({});
+        resolve(result || {});
+      });
+    } catch {
+      resolve({});
+    }
+  });
 }
 
 function setLocalStorage(values) {
-  return new Promise(resolve => chrome.storage.local.set(values, resolve));
+  return new Promise(resolve => {
+    try {
+      if (!chrome.runtime?.id) return resolve();
+      chrome.storage.local.set(values, () => {
+        if (chrome.runtime.lastError) return resolve(false);
+        resolve(true);
+      });
+    } catch {
+      resolve();
+    }
+  });
+}
+
+function removeLocalStorage(keys) {
+  try {
+    if (!chrome.runtime?.id) return;
+    chrome.storage.local.remove(keys);
+  } catch {
+    // Reloading an unpacked extension invalidates scripts already in the page.
+    // The refreshed content script will take over after the page is reloaded.
+  }
 }
 
 async function sha256Fingerprint(value) {
@@ -118,33 +172,6 @@ async function sha256Fingerprint(value) {
 
 async function getConversationStorageId(conversationKey) {
   return sha256Fingerprint(`${location.hostname}|${conversationKey}`);
-}
-
-async function getPersistentMessageFingerprint(message, conversationId) {
-  const carrier =
-    message.closest("[data-message-id]") ||
-    message.closest("[data-testid]") ||
-    message;
-  const messageId =
-    carrier.getAttribute?.("data-message-id") ||
-    message.getAttribute?.("data-message-id");
-  const testId = carrier.getAttribute?.("data-testid");
-
-  if (messageId) {
-    return sha256Fingerprint(`${conversationId}|id:${messageId}`);
-  }
-  if (testId) {
-    return sha256Fingerprint(`${conversationId}|test:${testId}`);
-  }
-
-  const userMessages = Array.from(
-    document.querySelectorAll('[data-message-author-role="user"]')
-  );
-  const messageIndex = Math.max(0, userMessages.indexOf(message));
-  const normalizedText = normalizeMessageText(message.innerText);
-  return sha256Fingerprint(
-    `${conversationId}|user:${messageIndex}|${normalizedText}`
-  );
 }
 
 const runtimeMessageKeys = new WeakMap();
@@ -266,6 +293,29 @@ function sessionSentimentFromRecord(record) {
   };
 }
 
+function signedSentimentScore(sentiment) {
+  const score = Number(sentiment?.score || 0);
+  if (sentiment?.label === "positive") return score;
+  if (sentiment?.label === "negative") return -score;
+  return 0;
+}
+
+function sentimentAggregateFromAnalyses(analyses) {
+  const aggregate = createSentimentAggregate();
+  (Array.isArray(analyses) ? analyses : []).forEach(analysis => {
+    const sentiment = analysis?.sentiment;
+    if (!sentiment || !["positive", "neutral", "negative"].includes(sentiment.label)) {
+      return;
+    }
+    const score = signedSentimentScore(sentiment);
+    aggregate.messages += 1;
+    aggregate[sentiment.label] += 1;
+    aggregate.scoreSum = Number((aggregate.scoreSum + score).toFixed(3));
+    aggregate.timeline.push({ label: sentiment.label, score });
+  });
+  return aggregate;
+}
+
 function sentimentRate(count, total) {
   return total ? Number(((count / total) * 100).toFixed(1)) : 0;
 }
@@ -372,19 +422,18 @@ function compactSentimentSummary(sentiment) {
   return summary;
 }
 
-async function logSentimentTotals(currentConversation = null, dailyData = null) {
-  const dailySentiment = dailyData ||
-    (await getLocalStorage(["dailySentiment"])).dailySentiment || {};
-  const allChats = Object.values(dailySentiment)
-    .filter(day => recordUsesCurrentSentimentModel(day))
-    .reduce((total, day) => {
-      total.messages += Number(day.messages || 0);
-      total.positive += Number(day.positive || 0);
-      total.neutral += Number(day.neutral || 0);
-      total.negative += Number(day.negative || 0);
-      total.scoreSum += Number(day.scoreSum || 0);
-      return total;
-    }, { messages: 0, positive: 0, neutral: 0, negative: 0, scoreSum: 0 });
+async function logSentimentTotals(currentConversation = null) {
+  const stored = await getLocalStorage([ANALYSIS_CONVERSATIONS_KEY]);
+  const conversations = stored[ANALYSIS_CONVERSATIONS_KEY] || {};
+  const allChats = Object.values(conversations).reduce((total, analyses) => {
+    const aggregate = sentimentAggregateFromAnalyses(analyses);
+    total.messages += aggregate.messages;
+    total.positive += aggregate.positive;
+    total.neutral += aggregate.neutral;
+    total.negative += aggregate.negative;
+    total.scoreSum = Number((total.scoreSum + aggregate.scoreSum).toFixed(3));
+    return total;
+  }, createSentimentAggregate());
 
   console.info("Sentinel sentiment totals:", {
     currentChat: compactSentimentSummary(currentConversation),
@@ -392,86 +441,203 @@ async function logSentimentTotals(currentConversation = null, dailyData = null) 
   });
 }
 
-function recordUsesCurrentSentimentModel(record) {
-  return Boolean(
-    record &&
-    record.method === SENTIMENT_METHOD &&
-    record.version === SENTIMENT_VERSION
+async function getConversationAnalysisRecords(conversationId) {
+  const stored = await getLocalStorage([ANALYSIS_CONVERSATIONS_KEY]);
+  const conversations = stored[ANALYSIS_CONVERSATIONS_KEY] || {};
+  const analyses = conversations[conversationId];
+  return Array.isArray(analyses) ? analyses : [];
+}
+
+function createIntentAggregate() {
+  return {
+    messages: 0,
+    learning: 0,
+    delegation: 0,
+    reasoning: 0,
+    criticalEngagement: 0,
+    mixed: 0,
+    unclear: 0,
+    scoreSums: {
+      learning: 0,
+      delegation: 0,
+      reasoning: 0,
+      criticalEngagement: 0
+    }
+  };
+}
+
+function intentAggregateFromAnalyses(analyses) {
+  const aggregate = createIntentAggregate();
+  (Array.isArray(analyses) ? analyses : []).forEach(analysis => {
+    const intention = analysis?.intention;
+    if (!intention || !intention.scores) return;
+    const labels = Array.isArray(intention.labels)
+      ? intention.labels.filter(label => INTENT_LABEL_KEYS.includes(label))
+      : [];
+    aggregate.messages += 1;
+    INTENT_LABEL_KEYS.forEach(key => {
+      if (labels.includes(key)) aggregate[key] += 1;
+      aggregate.scoreSums[key] = Number((
+        aggregate.scoreSums[key] + Number(intention.scores[key] || 0)
+      ).toFixed(3));
+    });
+    if (labels.length > 1) aggregate.mixed += 1;
+    if (labels.length === 0) aggregate.unclear += 1;
+  });
+  return aggregate;
+}
+
+function compactIntentSummary(record) {
+  const messages = Number(record?.messages || 0);
+  const counts = Object.fromEntries(
+    [...INTENT_LABEL_KEYS, "mixed", "unclear"].map(key => [
+      key,
+      Number(record?.[key] || 0)
+    ])
+  );
+  const rates = Object.fromEntries(
+    Object.entries(counts).map(([key, count]) => [
+      key,
+      sentimentRate(count, messages)
+    ])
+  );
+  const averageScores = Object.fromEntries(
+    INTENT_LABEL_KEYS.map(key => [
+      key,
+      messages
+        ? Number((Number(record?.scoreSums?.[key] || 0) / messages).toFixed(3))
+        : 0
+    ])
+  );
+
+  return { messages, counts, rates, averageScores };
+}
+
+function logIntentTotals(analyses) {
+  console.info(
+    "Sentinel intention totals for current chat:",
+    compactIntentSummary(intentAggregateFromAnalyses(analyses))
   );
 }
 
-async function getConversationSentimentRecord(conversationId) {
-  const stored = await getLocalStorage([SENTIMENT_CONVERSATIONS_KEY]);
-  const conversations = stored[SENTIMENT_CONVERSATIONS_KEY] || {};
-  const record = conversations[conversationId];
-  return recordUsesCurrentSentimentModel(record) ? record : null;
-}
+function persistConversationAnalysis(
+  conversationId,
+  sentiment,
+  intent,
+  existingAnalysisIndex = null
+) {
+  const operation = analysisPersistenceQueue.then(async () => {
+    const stored = await getLocalStorage([ANALYSIS_CONVERSATIONS_KEY]);
+    const conversations = stored[ANALYSIS_CONVERSATIONS_KEY] || {};
+    const analyses = Array.isArray(conversations[conversationId])
+      ? conversations[conversationId]
+      : [];
+    const canUpdateExisting = Number.isInteger(existingAnalysisIndex) &&
+      existingAnalysisIndex >= 0 &&
+      existingAnalysisIndex < analyses.length;
+    const analysis = canUpdateExisting
+      ? { ...analyses[existingAnalysisIndex] }
+      : {};
 
-async function hasPersistedSentimentMessage(conversationId, messageFingerprint) {
-  const record = await getConversationSentimentRecord(conversationId);
-  return Boolean(
-    record &&
-    Array.isArray(record.analyzedMessages) &&
-    record.analyzedMessages.includes(messageFingerprint)
-  );
-}
+    // Keep the prompt's original capture time on the shared analysis record.
+    // Intention inference updates this same record later and must not replace it.
+    if (!canUpdateExisting) analysis.recordedAt = new Date().toISOString();
 
-function persistConversationSentiment(conversationId, messageFingerprint, sentiment) {
-  const operation = sentimentPersistenceQueue.then(async () => {
-    const stored = await getLocalStorage([SENTIMENT_CONVERSATIONS_KEY]);
-    const conversations = stored[SENTIMENT_CONVERSATIONS_KEY] || {};
-    let record = conversations[conversationId];
-
-    if (!recordUsesCurrentSentimentModel(record)) {
-      record = {
-        ...createSentimentAggregate(sentiment.method, sentiment.version),
-        analyzedMessages: [],
-        createdAt: Date.now(),
-        updatedAt: Date.now()
+    if (sentiment) {
+      analysis.sentiment = {
+        label: sentiment.label,
+        score: Number(Number(sentiment.score || 0).toFixed(3))
       };
     }
+    if (intent) {
+      analysis.intention = {
+        labels: intent.labels.filter(label => INTENT_LABEL_KEYS.includes(label)),
+        scores: Object.fromEntries(INTENT_LABEL_KEYS.map(key => [
+          key,
+          Number(Number(intent.scores?.[key] || 0).toFixed(3))
+        ]))
+      };
+    }
+    if (!analysis.sentiment && !analysis.intention) {
+      return { saved: false, index: null };
+    }
 
-    if (record.analyzedMessages.includes(messageFingerprint)) return false;
-
-    record.messages += 1;
-    record[sentiment.label] += 1;
-    record.scoreSum = Number((record.scoreSum + sentiment.score).toFixed(3));
-    record.timeline.push({
-      index: record.messages,
-      score: sentiment.score,
-      label: sentiment.label,
-      timestamp: Date.now()
+    const analysisIndex = canUpdateExisting
+      ? existingAnalysisIndex
+      : analyses.length;
+    if (canUpdateExisting) analyses[analysisIndex] = analysis;
+    else analyses.push(analysis);
+    conversations[conversationId] = analyses;
+    const storageSaved = await setLocalStorage({
+      [ANALYSIS_CONVERSATIONS_KEY]: conversations
     });
-    record.timeline = record.timeline.slice(-100);
-    record.analyzedMessages.push(messageFingerprint);
-    record.updatedAt = Date.now();
-    conversations[conversationId] = record;
-
-    await setLocalStorage({ [SENTIMENT_CONVERSATIONS_KEY]: conversations });
-    return true;
+    if (!storageSaved) {
+      return { saved: false, index: null };
+    }
+    if (intent) logIntentTotals(analyses);
+    return { saved: true, index: analysisIndex };
   });
 
-  sentimentPersistenceQueue = operation.catch(error => {
-    console.error("Sentinel could not persist conversation sentiment:", error);
+  analysisPersistenceQueue = operation.catch(error => {
+    console.error("Sentinel could not persist conversation analysis:", error);
   });
   return operation;
 }
 
-async function restoreConversationSentiment(conversationKey) {
+function migrateConversationAnalysisIdentity(fromConversationKey, toConversationKey) {
+  const operation = analysisPersistenceQueue.then(async () => {
+    const fromId = await getConversationStorageId(fromConversationKey);
+    const toId = await getConversationStorageId(toConversationKey);
+    if (fromId === toId) return false;
+
+    const stored = await getLocalStorage([ANALYSIS_CONVERSATIONS_KEY]);
+    const conversations = stored[ANALYSIS_CONVERSATIONS_KEY] || {};
+    const source = conversations[fromId];
+    if (!Array.isArray(source) || !source.length) return false;
+
+    // A successful retry may already have populated the final identity. In
+    // that case, preserve it and only remove the obsolete temporary record.
+    if (!Array.isArray(conversations[toId]) || !conversations[toId].length) {
+      conversations[toId] = source;
+    }
+    delete conversations[fromId];
+
+    return Boolean(await setLocalStorage({
+      [ANALYSIS_CONVERSATIONS_KEY]: conversations
+    }));
+  });
+
+  analysisPersistenceQueue = operation.catch(error => {
+    console.error("Sentinel could not migrate the conversation identity:", error);
+  });
+  return operation;
+}
+
+let lastRestoredConversationKey = null;
+
+async function restoreConversationSentiment(conversationKey, force = false) {
   try {
     // ChatGPT briefly exposes non-conversation routes while navigating. Wait
     // for /c/<id> so temporary DOM states never become storage identities.
     if (!isCanonicalConversationRoute()) {
       if (isEmptyChatGptNewChatRoute()) {
         sessionStorage.removeItem("tms_sessionSentiment");
-        chrome.storage.local.remove("activeSession");
+        removeLocalStorage("activeSession");
       }
       return;
     }
 
+    if (!force && conversationKey === lastRestoredConversationKey) return;
+    lastRestoredConversationKey = conversationKey;
+
     const conversationId = await getConversationStorageId(conversationKey);
-    const record = await getConversationSentimentRecord(conversationId);
+    const analyses = await getConversationAnalysisRecords(conversationId);
     if (conversationKey !== currentConversationKey) return;
+
+    const aggregate = sentimentAggregateFromAnalyses(analyses);
+    const record = aggregate.messages ? aggregate : null;
+
+    scheduleMiniMapRender(document.querySelectorAll('[data-message-author-role]'));
 
     // Replace the previous chat snapshot only after the new record is ready.
     // This avoids a temporary null value while navigating between saved chats.
@@ -481,8 +647,16 @@ async function restoreConversationSentiment(conversationKey) {
     sessionStorage.removeItem("tms_lastActivityTime");
 
     if (!record) {
-      sessionStorage.removeItem("tms_sessionSentiment");
-      chrome.storage.local.remove("activeSession");
+      const visibleSignature = getVisibleConversationSignature();
+      const preserveLiveTransition = Boolean(
+        lastSuccessfulAnalysisSave?.visibleSignature &&
+        Date.now() - lastSuccessfulAnalysisSave.savedAt < 30000 &&
+        visibleSignature === lastSuccessfulAnalysisSave.visibleSignature
+      );
+      if (!preserveLiveTransition) {
+        sessionStorage.removeItem("tms_sessionSentiment");
+        removeLocalStorage("activeSession");
+      }
       console.info("Sentinel sentiment: no saved history for this conversation");
       await logSentimentTotals();
       return;
@@ -490,18 +664,14 @@ async function restoreConversationSentiment(conversationKey) {
 
     const sessionSentiment = sessionSentimentFromRecord(record);
     sessionStorage.setItem("tms_sessionSentiment", JSON.stringify(sessionSentiment));
-    await setLocalStorage({
-      activeSession: {
-        totalHits: 0,
-        words: {},
-        sentiment: sessionSentiment
-      }
-    });
     console.info(
       `Sentinel sentiment restored: ${sessionSentiment.messages} message(s)`
     );
     await logSentimentTotals(sessionSentiment);
   } catch (error) {
+    if (lastRestoredConversationKey === conversationKey) {
+      lastRestoredConversationKey = null;
+    }
     console.error("Sentinel could not restore conversation sentiment:", error);
   }
 }
@@ -527,7 +697,9 @@ function getVisibleConversationSignature(messages = document.querySelectorAll('[
 
 function visibleMessagesOverlapMiniMap(messages) {
   if (!miniMapEntries.size) return false;
-  return Array.from(messages).some(message => miniMapEntries.has(getMessageKey(message)));
+  return Array.from(messages).some(message =>
+    miniMapEntries.has(getMessageKey(message)) || Boolean(findReusableMiniMapEntry(message))
+  );
 }
 
 function clearConversationState(clearSessionStats = true) {
@@ -536,6 +708,10 @@ function clearConversationState(clearSessionStats = true) {
   miniMapEntries.clear();
   miniMapLineRefs = [];
   miniMapOrder = [];
+  miniMapIntentsByMessageKey.clear();
+  miniMapIntentPendingKeys.clear();
+  miniMapIntentAttemptedKeys.clear();
+  clearTimeout(miniMapIntentBackfillTimer);
   initialScanComplete = false;
   miniMapBuildComplete = false;
 
@@ -556,7 +732,7 @@ function clearConversationState(clearSessionStats = true) {
     sessionStorage.removeItem("tms_lastTriggerTime");
     sessionStorage.removeItem("tms_lastActivityTime");
     sessionStorage.removeItem("tms_sessionSentiment");
-    chrome.storage.local.remove("activeSession");
+    removeLocalStorage("activeSession");
   }
 }
 
@@ -564,7 +740,9 @@ function handleConversationChange() {
   const nextKey = getConversationKey();
   if (nextKey === currentConversationKey) return false;
 
+  const previousKey = currentConversationKey;
   const currentMessages = document.querySelectorAll('[data-message-author-role]');
+  const previousVisibleSignature = getVisibleConversationSignature(currentMessages);
   staleConversationSignature = visibleMessagesOverlapMiniMap(currentMessages)
     ? getVisibleConversationSignature(currentMessages)
     : null;
@@ -574,6 +752,29 @@ function handleConversationChange() {
   // swapped after the next conversation record has loaded.
   clearConversationState(false);
   conversationRestorePromise = restoreConversationSentiment(nextKey);
+
+  const recentSave = lastSuccessfulAnalysisSave;
+  if (
+    recentSave?.conversationKey === previousKey &&
+    Date.now() - recentSave.savedAt < 30000 &&
+    previousKey.startsWith("/c/") &&
+    nextKey.startsWith("/c/")
+  ) {
+    setTimeout(async () => {
+      if (currentConversationKey !== nextKey || getConversationKey() !== nextKey) return;
+      const currentSignature = getVisibleConversationSignature();
+      if (!currentSignature || currentSignature !== previousVisibleSignature) return;
+
+      const migrated = await migrateConversationAnalysisIdentity(previousKey, nextKey);
+      if (!migrated) return;
+      lastSuccessfulAnalysisSave = {
+        conversationKey: nextKey,
+        savedAt: Date.now(),
+        visibleSignature: currentSignature
+      };
+      conversationRestorePromise = restoreConversationSentiment(nextKey, true);
+    }, 1200);
+  }
   return true;
 }
 
@@ -581,6 +782,11 @@ const riskMarkers = new Map();
 const miniMapEntries = new Map();
 let miniMapLineRefs = [];
 let miniMapOrder = [];
+const miniMapIntentsByMessageKey = new Map();
+const miniMapIntentPendingKeys = new Set();
+const miniMapIntentAttemptedKeys = new Set();
+let miniMapIntentBackfillTimer = null;
+let miniMapIntentBackfillRunning = false;
 let riskBarUpdateTimer = null;
 let miniMapRenderTimer = null;
 let initialScanComplete = false;
@@ -593,6 +799,56 @@ let allowFirstVisibleUserCount = false;
 let pendingNewChatPromptHash = null;
 let staleConversationSignature = null;
 let conversationRestorePromise = Promise.resolve();
+
+const SUBMISSION_COMPOSER_SELECTORS = [
+  "#prompt-textarea",
+  '[data-testid="composer-text-input"]',
+  'textarea[placeholder]',
+  '[contenteditable="true"][role="textbox"]',
+  'form [contenteditable="true"]',
+  'div.ProseMirror[contenteditable="true"]'
+];
+
+function findSubmissionComposer(target) {
+  if (target instanceof Element) {
+    for (const selector of SUBMISSION_COMPOSER_SELECTORS) {
+      if (target.matches(selector)) return target;
+      const composer = target.closest(selector);
+      if (composer) return composer;
+    }
+  }
+
+  const active = document.activeElement;
+  if (active instanceof Element) {
+    for (const selector of SUBMISSION_COMPOSER_SELECTORS) {
+      if (active.matches(selector)) return active;
+      const composer = active.closest(selector);
+      if (composer) return composer;
+    }
+  }
+  return null;
+}
+
+function rememberSubmittedPrompt(composer) {
+  if (!composer || isSentinelTemporarilyDisabled()) return;
+  const text = composer instanceof HTMLTextAreaElement || composer instanceof HTMLInputElement
+    ? composer.value
+    : composer.innerText || composer.textContent;
+  const normalized = normalizeMessageText(text);
+  if (normalized) pendingNewChatPromptHash = tmsHash(normalized);
+}
+
+function isSubmissionButton(target) {
+  if (!(target instanceof Element)) return false;
+  const button = target.closest('button, [role="button"]');
+  if (!button) return false;
+  const label = [
+    button.getAttribute("aria-label"),
+    button.getAttribute("data-testid"),
+    button.getAttribute("title")
+  ].filter(Boolean).join(" ");
+  return /send|submit/i.test(label);
+}
 function getRiskColor(hits) {
   if (hits >= 5) return "#d32f2f";
   if (hits >= 3) return "#ff9500";
@@ -690,11 +946,16 @@ function getRiskLabel(hits) {
 }
 
 function ensureRiskBar() {
-  if (document.getElementById("tms-risk-style")) return;
+  const existingBar = document.getElementById("tms-risk-bar");
+  if (existingBar) {
+    existingBar.style.display = "";
+    return;
+  }
 
-  const style = document.createElement("style");
-  style.id = "tms-risk-style";
-  style.innerHTML = `
+  if (!document.getElementById("tms-risk-style")) {
+    const style = document.createElement("style");
+    style.id = "tms-risk-style";
+    style.innerHTML = `
     #tms-risk-bar {
       --tms-risk-line-color: #30d158;
       --tms-risk-line-glow: rgba(48,209,88,0.42);
@@ -737,9 +998,63 @@ function ensureRiskBar() {
     }
     #tms-risk-mini {
       position: absolute;
-      inset: 8px 7px 8px 2px;
+      inset: 8px 7px 76px 2px;
       pointer-events: none;
       z-index: 1;
+    }
+    #tms-intent-legend {
+      position: absolute;
+      left: 2px;
+      right: 2px;
+      bottom: 6px;
+      min-height: 54px;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      align-content: center;
+      column-gap: 5px;
+      row-gap: 7px;
+      padding: 8px 3px;
+      box-sizing: border-box;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+      box-shadow: none;
+      color: #505054;
+      font: 600 10px/1.2 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      pointer-events: none;
+      z-index: 5;
+    }
+    .tms-intent-legend-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 5px;
+      min-width: 0;
+    }
+    .tms-intent-legend-dot {
+      width: 8px;
+      height: 8px;
+      margin-top: 2px;
+      flex: 0 0 8px;
+      border-radius: 50%;
+      background: var(--tms-legend-color);
+      box-shadow: 0 0 0 1px rgba(0, 0, 0, .08);
+    }
+    .tms-intent-legend-label {
+      min-width: 0;
+      overflow-wrap: normal;
+      word-break: normal;
+      hyphens: none;
+    }
+    .tms-intent-layer {
+      position: absolute;
+      left: 0;
+      right: 0;
+      min-height: 0;
+      border-radius: 0;
+      background: var(--tms-intent-overlay, transparent);
+      opacity: 0.94;
+      pointer-events: none;
+      z-index: 0;
     }
     .tms-mini-line {
       position: absolute;
@@ -749,12 +1064,13 @@ function ensureRiskBar() {
       margin-bottom: 0;
       overflow: hidden;
       color: #686868;
-      font: 500 3.65px/3.65px Consolas, "SF Mono", Menlo, monospace;
+      font: 500 5.65px/5.25px Consolas, "SF Mono", Menlo, monospace;
       letter-spacing: 0;
       white-space: nowrap;
       text-rendering: geometricPrecision;
       pointer-events: none;
       opacity: 1;
+      z-index: 1;
     }
     .tms-mini-line[data-role="user"] {
       color: #007f9f;
@@ -814,15 +1130,84 @@ function ensureRiskBar() {
       border-radius: 8px !important;
       transition: outline-color 0.25s ease;
     }
-  `;
-  document.head.appendChild(style);
+    html[data-sentinel-page-theme="dark"] #tms-risk-bar {
+      background: linear-gradient(
+        180deg,
+        rgba(38,38,40,0.96),
+        rgba(25,25,27,0.94)
+      );
+      border-left-color: rgba(255,255,255,0.12);
+      box-shadow: inset 1px 0 0 rgba(255,255,255,0.04);
+    }
+    html[data-sentinel-page-theme="dark"] #tms-risk-bar::before {
+      background: repeating-linear-gradient(
+        to bottom,
+        transparent 0,
+        transparent 9px,
+        rgba(255,255,255,0.035) 10px
+      );
+    }
+    html[data-sentinel-page-theme="dark"] #tms-intent-legend {
+      color: #c7c7cc;
+    }
+    html[data-sentinel-page-theme="dark"] .tms-intent-legend-dot {
+      box-shadow: 0 0 0 1px rgba(255,255,255,.12);
+    }
+    html[data-sentinel-page-theme="dark"] .tms-intent-layer {
+      opacity: 0.78;
+      filter: saturate(1.18) brightness(1.08);
+    }
+    html[data-sentinel-page-theme="dark"] .tms-mini-line {
+      color: #c7c7cc;
+    }
+    html[data-sentinel-page-theme="dark"] .tms-mini-line[data-role="user"] {
+      color: #72d8f2;
+    }
+    html[data-sentinel-page-theme="dark"] .tms-mini-line[data-role="assistant"] {
+      color: #d1d1d6;
+    }
+    html[data-sentinel-page-theme="dark"] .tms-mini-line[data-role="unknown"] {
+      color: #aeaeb2;
+    }
+    html[data-sentinel-page-theme="dark"] .tms-mini-line[data-intent-background="true"] {
+      color: #202124;
+      text-shadow: 0 1px 0 rgba(255,255,255,.28);
+    }
+    html[data-sentinel-page-theme="dark"] .tms-mini-line[data-intent-background="true"][data-role="user"] {
+      color: #12343b;
+    }
+    html[data-sentinel-page-theme="dark"] #tms-risk-viewport {
+      background: rgba(255,255,255,0.035);
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.10);
+    }
+    `;
+    document.head.appendChild(style);
+  }
 
   const bar = document.createElement("div");
   bar.id = "tms-risk-bar";
-  bar.title = "Sentinel trigger minimap";
+  bar.title = "Sentinel conversation minimap";
   bar.innerHTML = `
     <div id="tms-risk-mini"></div>
     <div id="tms-risk-viewport"></div>
+    <div id="tms-intent-legend" aria-label="Interaction intention colour legend">
+      <span class="tms-intent-legend-item">
+        <span class="tms-intent-legend-dot" style="--tms-legend-color:#c0e0c4"></span>
+        <span class="tms-intent-legend-label">User Reasoning</span>
+      </span>
+      <span class="tms-intent-legend-item">
+        <span class="tms-intent-legend-dot" style="--tms-legend-color:#f8cbae"></span>
+        <span class="tms-intent-legend-label">Learning</span>
+      </span>
+      <span class="tms-intent-legend-item">
+        <span class="tms-intent-legend-dot" style="--tms-legend-color:#aed3ee"></span>
+        <span class="tms-intent-legend-label">Critical Engagement</span>
+      </span>
+      <span class="tms-intent-legend-item">
+        <span class="tms-intent-legend-dot" style="--tms-legend-color:#ffe084"></span>
+        <span class="tms-intent-legend-label">Delegation</span>
+      </span>
+    </div>
   `;
   document.body.appendChild(bar);
 
@@ -858,6 +1243,8 @@ function updateRiskBarFrame() {
   if (!top || top < 48 || top > 140) {
     top = 80;
   }
+
+  top = Math.max(40, top - 52);
 
   bar.style.top = `${top}px`;
   bar.style.height = `calc(100vh - ${top}px)`;
@@ -905,12 +1292,32 @@ function lineContainsTrigger(text, matchedTerms = []) {
 
 function syncMiniMapEntries(messages) {
   const currentKeys = [];
+  const claimedKeys = new Set();
 
   Array.from(messages).forEach(message => {
-    const key = getMessageKey(message);
+    let key = getMessageKey(message);
     const text = getMiniMapText(message);
-    const existing = miniMapEntries.get(key);
+    let existing = miniMapEntries.get(key);
+
+    // ChatGPT can replace a message's DOM node while generating a response or
+    // updating the conversation title. When no stable data-message-id exists,
+    // reconnect the replacement node to its previous minimap entry instead of
+    // treating the same prompt as a second message at a different position.
+    if (!existing) {
+      const reusable = findReusableMiniMapEntry(message, claimedKeys);
+      if (reusable) {
+        key = reusable.key;
+        existing = reusable;
+        runtimeMessageKeys.set(message, {
+          key,
+          role: getMessageRole(message),
+          textHash: tmsHash(normalizeMessageText(message.innerText))
+        });
+      }
+    }
+
     currentKeys.push(key);
+    claimedKeys.add(key);
 
     if (existing) {
       existing.element = message;
@@ -933,6 +1340,32 @@ function syncMiniMapEntries(messages) {
   });
 
   integrateMiniMapOrder(currentKeys, messages);
+}
+
+function findReusableMiniMapEntry(message, claimedKeys = new Set()) {
+  const role = getMessageRole(message);
+  const text = normalizeMessageText(getMiniMapText(message));
+  if (!text) return null;
+
+  const orderedKeys = [
+    ...miniMapOrder,
+    ...Array.from(miniMapEntries.keys()).filter(key => !miniMapOrder.includes(key))
+  ];
+
+  for (const key of orderedKeys) {
+    if (claimedKeys.has(key)) continue;
+    const entry = miniMapEntries.get(key);
+    if (!entry || entry.role !== role) continue;
+    if (normalizeMessageText(entry.text) !== text) continue;
+
+    // A connected node represents a real existing message. Reuse only entries
+    // whose old node was replaced, which still allows repeated identical
+    // prompts to remain separate chronological messages.
+    if (entry.element && entry.element !== message && entry.element.isConnected) continue;
+    return entry;
+  }
+
+  return null;
 }
 
 function isVisibleWindowNearBottom(messages) {
@@ -1421,6 +1854,87 @@ async function focusTriggerMessage(key, fallbackElement) {
   }
 }
 
+const MINIMAP_INTENT_PRESENTATION = {
+  learning: { overlay: "rgba(248,203,173,0.94)" },
+  delegation: { overlay: "rgba(255,224,132,0.94)" },
+  reasoning: { overlay: "rgba(192,224,174,0.94)" },
+  criticalEngagement: { overlay: "rgba(174,211,238,0.94)" },
+  unclear: { overlay: "rgba(239,160,160,0.94)" }
+};
+
+function getMiniMapIntent(entry) {
+  return miniMapIntentsByMessageKey.get(entry.key) || null;
+}
+
+function getMiniMapIntentLayer(intent) {
+  if (!intent) return null;
+
+  const labels = Array.isArray(intent?.labels)
+    ? intent.labels.filter(label => MINIMAP_INTENT_PRESENTATION[label])
+    : [];
+  if (!labels.length) labels.push("unclear");
+
+  // Keep every prompt as one solid block. For multi-label results, use the
+  // detected label with the highest model score instead of a colour gradient.
+  const primaryLabel = labels.reduce((best, label) => (
+    Number(intent?.scores?.[label] || 0) > Number(intent?.scores?.[best] || 0)
+      ? label
+      : best
+  ), labels[0]);
+  return {
+    labels: [primaryLabel],
+    background: MINIMAP_INTENT_PRESENTATION[primaryLabel].overlay
+  };
+}
+
+function scheduleMiniMapIntentBackfill(entries) {
+  clearTimeout(miniMapIntentBackfillTimer);
+  if (miniMapIntentBackfillRunning || isSentinelTemporarilyDisabled()) return;
+
+  const conversationKey = currentConversationKey;
+  const missingEntries = entries.filter(entry =>
+    entry.role === "user" &&
+    normalizeMessageText(entry.text) &&
+    !miniMapIntentsByMessageKey.has(entry.key) &&
+    !miniMapIntentPendingKeys.has(entry.key) &&
+    !miniMapIntentAttemptedKeys.has(entry.key)
+  );
+  if (!missingEntries.length) return;
+
+  miniMapIntentBackfillTimer = setTimeout(async () => {
+    if (conversationKey !== currentConversationKey || miniMapIntentBackfillRunning) return;
+    miniMapIntentBackfillRunning = true;
+    try {
+      for (const entry of missingEntries) {
+        if (
+          conversationKey !== currentConversationKey ||
+          isSentinelTemporarilyDisabled()
+        ) break;
+        if (
+          miniMapIntentsByMessageKey.has(entry.key) ||
+          miniMapIntentPendingKeys.has(entry.key)
+        ) continue;
+
+        miniMapIntentAttemptedKeys.add(entry.key);
+        const intent = await analyzeIntentLocally(entry.text);
+        if (
+          conversationKey !== currentConversationKey ||
+          isSentinelTemporarilyDisabled()
+        ) break;
+        if (intent) {
+          miniMapIntentsByMessageKey.set(entry.key, intent);
+          scheduleMiniMapRender(document.querySelectorAll('[data-message-author-role]'));
+        }
+      }
+    } finally {
+      miniMapIntentBackfillRunning = false;
+      if (conversationKey !== currentConversationKey) {
+        scheduleMiniMapRender(document.querySelectorAll('[data-message-author-role]'));
+      }
+    }
+  }, 900);
+}
+
 function renderMiniMap(messages) {
   ensureRiskBar();
   syncMiniMapEntries(messages);
@@ -1455,8 +1969,8 @@ function renderMiniMap(messages) {
     });
   });
 
-  const normalLineStep = 3.65;
-  const minLineStep = 2.45;
+  const normalLineStep = 5.25;
+  const minLineStep = 3.4;
   const normalCapacity = Math.max(1, Math.floor(miniHeight / normalLineStep));
   const minimumCapacity = Math.max(1, Math.floor(miniHeight / minLineStep));
   let renderedLines = allLines;
@@ -1478,8 +1992,8 @@ function renderMiniMap(messages) {
 
   const lineCount = Math.max(1, renderedLines.length);
   lineStep = Math.min(lineStep, miniHeight / lineCount);
-  const lineHeight = Math.max(1.95, lineStep);
-  const fontSize = Math.max(1.95, lineHeight);
+  const lineHeight = Math.max(2.8, lineStep);
+  const fontSize = Math.max(3.2, lineHeight * 1.08);
 
   mini.innerHTML = "";
   miniMapLineRefs = [];
@@ -1504,6 +2018,9 @@ function renderMiniMap(messages) {
 
     line.className = "tms-mini-line";
     line.dataset.role = entry.role;
+    if (entry.role === "user" && getMiniMapIntentLayer(getMiniMapIntent(entry))) {
+      line.dataset.intentBackground = "true";
+    }
     line.style.top = `${top}px`;
     line.style.height = `${lineHeight}px`;
     line.style.lineHeight = `${lineHeight}px`;
@@ -1513,6 +2030,27 @@ function renderMiniMap(messages) {
     miniMapLineRefs.push({ entry, top, height: lineHeight, lineIndex: lineRef.lineIndex, text: lineRef.text });
     mini.appendChild(line);
   });
+
+  entries.forEach(entry => {
+    if (entry.role !== "user") return;
+    const intent = getMiniMapIntent(entry);
+    const presentation = getMiniMapIntentLayer(intent);
+    if (!presentation || entry.mapHeight <= 0) return;
+
+    const layer = document.createElement("div");
+    layer.className = "tms-intent-layer";
+    layer.dataset.intentLabels = presentation.labels.join(",");
+    // The miniature font is slightly larger than its line box, so its visible
+    // glyphs sit above the mathematical line top. Lift the colour band by the
+    // same optical offset to keep it centred around the prompt text.
+    const opticalOffset = Math.max(0.75, lineHeight * 0.18);
+    layer.style.top = `${entry.mapTop - opticalOffset}px`;
+    layer.style.height = `${Math.max(1, entry.mapHeight)}px`;
+    layer.style.setProperty("--tms-intent-overlay", presentation.background);
+    mini.appendChild(layer);
+  });
+
+  scheduleMiniMapIntentBackfill(entries);
 
   updateRiskBarPositions();
 }
@@ -1664,13 +2202,15 @@ function updateRiskBarPositions() {
   const scrollHeight = Math.max(metrics.scrollHeight, metrics.clientHeight, 1);
   const mini = document.getElementById("tms-risk-mini");
   const viewport = document.getElementById("tms-risk-viewport");
+  const mapTop = mini?.offsetTop || 0;
+  const mapHeight = mini?.clientHeight || barHeight;
   const visibleRatio = Math.min(metrics.clientHeight / scrollHeight, 1);
-  const viewportHeight = Math.max(42, barHeight * visibleRatio);
+  const viewportHeight = Math.min(mapHeight, Math.max(42, mapHeight * visibleRatio));
   const maxScroll = Math.max(scrollHeight - metrics.clientHeight, 1);
-  const viewportTop = (metrics.scrollTop / maxScroll) * (barHeight - viewportHeight);
+  const viewportTop = mapTop + (metrics.scrollTop / maxScroll) * (mapHeight - viewportHeight);
 
   if (viewport) {
-    viewport.style.top = `${Math.min(barHeight - viewportHeight, Math.max(0, viewportTop))}px`;
+    viewport.style.top = `${Math.min(mapTop + mapHeight - viewportHeight, Math.max(mapTop, viewportTop))}px`;
     viewport.style.height = `${viewportHeight}px`;
   }
 
@@ -1678,10 +2218,10 @@ function updateRiskBarPositions() {
     const entry = miniMapEntries.get(item.key);
     const top = entry && mini
       ? mini.offsetTop + getRiskMarkerTop(entry, item.matchedWords)
-      : 0;
+      : mapTop;
     const markerHeight = 3;
 
-    item.marker.style.top = `${Math.min(barHeight - markerHeight, Math.max(0, top))}px`;
+    item.marker.style.top = `${Math.min(mapTop + mapHeight - markerHeight, Math.max(mapTop, top))}px`;
     item.marker.style.height = `${markerHeight}px`;
   });
 
@@ -1884,14 +2424,11 @@ function detectTriggers(text) {
 /*
   STORAGE
   TODO: better these functions
-  - dailyCounts -> chrome.storage.local (for trends)
-  - dailySentiment -> chrome.storage.local (aggregate tone only)
-  - sentimentConversations -> chrome.storage.local (per-chat aggregates and fingerprints)
+  - conversationAnalysesV1 -> chrome.storage.local (classifications and scores only)
   - sessionTriggers -> window.sessionStorage (resets when tab closes)
   - sessionSentiment -> window.sessionStorage (active conversation snapshot, no text)
 */
 function updateStorage(hits, matchedTerms, termCounts, sentiment) {
-  const today = new Date().toISOString().split("T")[0];
   const now = Date.now();
   const SESSION_TIMEOUT = 30 * 60 * 1000;
 
@@ -1933,14 +2470,13 @@ function updateStorage(hits, matchedTerms, termCounts, sentiment) {
   });
 
   if (sentiment && sessionSentiment) {
+    const signedScore = signedSentimentScore(sentiment);
     sessionSentiment.messages += 1;
     sessionSentiment[sentiment.label] += 1;
-    sessionSentiment.scoreSum = Number((sessionSentiment.scoreSum + sentiment.score).toFixed(3));
+    sessionSentiment.scoreSum = Number((sessionSentiment.scoreSum + signedScore).toFixed(3));
     sessionSentiment.timeline.push({
-      index: sessionSentiment.messages,
-      score: sentiment.score,
-      label: sentiment.label,
-      timestamp: now
+      score: signedScore,
+      label: sentiment.label
     });
     // Keep a bounded aggregate history and never store the message text.
     sessionSentiment.timeline = sessionSentiment.timeline.slice(-100);
@@ -1961,64 +2497,21 @@ function updateStorage(hits, matchedTerms, termCounts, sentiment) {
     showPopup(sessionTotalHits, matchedTerms);
   }
 
-  // persistent daily trends
-  if (hits > 0) {
-    chrome.storage.local.get(["dailyCounts"], res => {
-      const daily = res.dailyCounts || {};
-      daily[today] = (daily[today] || 0) + hits;
-      chrome.storage.local.set({ dailyCounts: daily });
-    });
-
-    chrome.storage.local.get(["dailyWordCounts"], res => {
-      const dailyWordCounts = res.dailyWordCounts || {};
-      if (!dailyWordCounts[today]) dailyWordCounts[today] = {};
-
-      Object.entries(termCounts).forEach(([term, count]) => {
-        dailyWordCounts[today][term] = (dailyWordCounts[today][term] || 0) + count;
-      });
-
-      chrome.storage.local.set({ dailyWordCounts });
-    });
-  }
-
   if (sentiment) {
-    chrome.storage.local.get(["dailySentiment"], res => {
-      const dailySentiment = res.dailySentiment || {};
-      const existingDay = dailySentiment[today];
-      const day = existingDay &&
-        existingDay.method === sentiment.method &&
-        existingDay.version === sentiment.version
-        ? existingDay
-        : {
-        messages: 0, positive: 0, neutral: 0, negative: 0, scoreSum: 0,
-        method: sentiment.method, version: sentiment.version
-      };
-      day.messages += 1;
-      day[sentiment.label] += 1;
-      day.scoreSum = Number((day.scoreSum + sentiment.score).toFixed(3));
-      dailySentiment[today] = day;
-      chrome.storage.local.set({ dailySentiment }, () => {
-        logSentimentTotals(sessionSentiment, dailySentiment);
-      });
-    });
+    logSentimentTotals(sessionSentiment);
   }
-
-  chrome.storage.local.set({
-    activeSession: {
-      totalHits: sessionTotalHits,
-      words: sessionTriggers,
-      sentiment: sessionSentiment
-    }
-  });
 
   return sessionTotalHits;
 }
 
 async function analyzeSentimentLocally(text) {
   try {
+    if (!hasExtensionContext() || isSentinelTemporarilyDisabled()) return null;
+    const promptText = typeof text === "string" ? text.trim() : "";
+    if (!promptText) return null;
     const response = await chrome.runtime.sendMessage({
       type: "sentinel:analyze-sentiment",
-      text
+      text: promptText
     });
     if (!response?.ok) {
       console.error(
@@ -2027,13 +2520,37 @@ async function analyzeSentimentLocally(text) {
       );
       return null;
     }
-    console.info(
-      `Sentinel sentiment stored: ${response.sentiment.label} ` +
-      `(${response.sentiment.confidence})`
-    );
     return response.sentiment;
   } catch (error) {
+    // Reloading or updating an unpacked extension leaves its previous content
+    // script in the tab until the page refreshes. Stop quietly in that state;
+    // the newly injected script takes over after the refresh.
+    if (isExtensionContextInvalidated(error)) return null;
     console.error("Sentinel could not reach the local sentiment model:", error);
+    return null;
+  }
+}
+
+async function analyzeIntentLocally(text) {
+  try {
+    if (!hasExtensionContext() || isSentinelTemporarilyDisabled()) return null;
+    const promptText = typeof text === "string" ? text.trim() : "";
+    if (!promptText) return null;
+    const response = await chrome.runtime.sendMessage({
+      type: "sentinel:analyze-intent",
+      text: promptText
+    });
+    if (!response?.ok) {
+      console.error(
+        "Sentinel local intention model returned no result:",
+        response?.error || "unknown-error"
+      );
+      return null;
+    }
+    return response.intent;
+  } catch (error) {
+    if (isExtensionContextInvalidated(error)) return null;
+    console.error("Sentinel could not reach the local intention model:", error);
     return null;
   }
 }
@@ -2107,8 +2624,8 @@ function highlight(element) {
 
 // main scanning function
 async function processMessage(msg) {
+  if (isSentinelTemporarilyDisabled()) return;
   const key = getMessageKey(msg);
-  const conversationKeyAtStart = currentConversationKey;
   const alreadyCounted = wasAlreadyCounted(key);
   const result = detectTriggers(msg.innerText);
 
@@ -2130,59 +2647,109 @@ async function processMessage(msg) {
       return;
     }
 
-    // Mark only after the permanent conversation identity exists. This keeps
-    // repeated scans from duplicating inference while allowing first prompts
-    // in brand-new chats to be analysed and persisted.
-    markCounted(key);
+    // location.pathname can receive its permanent /c/<id> just before the
+    // scan loop updates currentConversationKey. Never persist against that
+    // stale New Chat identity; let the next scan synchronize the route first.
+    const conversationKeyAtStart = getConversationKey();
+    if (conversationKeyAtStart !== currentConversationKey) {
+      setTimeout(scan, 0);
+      return;
+    }
 
     await conversationRestorePromise;
-    if (conversationKeyAtStart !== currentConversationKey) return;
+    if (
+      conversationKeyAtStart !== currentConversationKey ||
+      conversationKeyAtStart !== getConversationKey()
+    ) return;
 
     const conversationId = await getConversationStorageId(conversationKeyAtStart);
-    const messageFingerprint = await getPersistentMessageFingerprint(msg, conversationId);
-    const pendingKey = `${conversationId}:${messageFingerprint}`;
+    const pendingKey = `${conversationId}:${key}`;
 
-    if (
-      pendingSentimentFingerprints.has(pendingKey) ||
-      await hasPersistedSentimentMessage(conversationId, messageFingerprint)
-    ) {
+    if (pendingAnalysisKeys.has(pendingKey)) {
       pendingNewChatPromptHash = null;
       allowFirstVisibleUserCount = false;
       return;
     }
 
-    pendingSentimentFingerprints.add(pendingKey);
+    pendingAnalysisKeys.add(pendingKey);
+    miniMapIntentPendingKeys.add(key);
     try {
-      const sentiment = await analyzeSentimentLocally(msg.innerText || "");
-      if (conversationKeyAtStart !== currentConversationKey) return;
+      const promptText = normalizeMessageText(msg.innerText);
+      if (!promptText) {
+        // Image/file-only submissions are valid behavioural prompts, but
+        // sentiment and intention models require text. Mark the DOM message as
+        // handled without sending an empty request to either local model.
+        markCounted(key);
+        pendingNewChatPromptHash = null;
+        allowFirstVisibleUserCount = false;
+        return;
+      }
+      const sentiment = await analyzeSentimentLocally(promptText);
+      // A first request can arrive while the local model is still starting.
+      // Do not mark the prompt as processed until a classification has really
+      // been saved; the next scan can then retry a transient startup failure.
+      if (!sentiment) return;
 
-      if (sentiment) {
-        const persisted = await persistConversationSentiment(
-          conversationId,
-          messageFingerprint,
+      // Persist and expose sentiment immediately. Intention inference can be
+      // slower, especially on the first prompt after startup, and must not
+      // delay the conversation colour visualization.
+      const persisted = await persistConversationAnalysis(
+        conversationId,
+        sentiment,
+        null
+      );
+      if (!persisted?.saved) return;
+      const analysisIndex = persisted.index;
+      markCounted(key);
+      const conversationIsStillActive = !isSentinelTemporarilyDisabled() &&
+        conversationKeyAtStart === currentConversationKey &&
+        conversationKeyAtStart === getConversationKey();
+      let sessionTotalHits = 0;
+      if (conversationIsStillActive) {
+        lastSuccessfulAnalysisSave = {
+          conversationKey: conversationKeyAtStart,
+          savedAt: Date.now(),
+          visibleSignature: getVisibleConversationSignature()
+        };
+        sessionTotalHits = updateStorage(
+          result.hits,
+          result.matchedWords,
+          result.termCounts,
           sentiment
         );
-        if (!persisted) {
-          pendingNewChatPromptHash = null;
-          return;
-        }
+      }
+      window.dispatchEvent(new CustomEvent("sentinel:sentiment-updated"));
+      if (conversationIsStillActive && result.hits > 0) {
+        applyRiskMarkerVisualByKey(key, sessionTotalHits);
       }
 
-      if (conversationKeyAtStart !== currentConversationKey) return;
+      pendingNewChatPromptHash = null;
+      allowFirstVisibleUserCount = false;
 
-      const sessionTotalHits = updateStorage(
-        result.hits,
-        result.matchedWords,
-        result.termCounts,
-        sentiment
-      );
-      if (result.hits > 0) applyRiskMarkerVisualByKey(key, sessionTotalHits);
+      const intent = await analyzeIntentLocally(promptText);
+      if (intent) {
+        await persistConversationAnalysis(
+          conversationId,
+          null,
+          intent,
+          analysisIndex
+        );
+        if (
+          !isSentinelTemporarilyDisabled() &&
+          conversationKeyAtStart === currentConversationKey &&
+          conversationKeyAtStart === getConversationKey()
+        ) {
+          miniMapIntentsByMessageKey.set(key, intent);
+          scheduleMiniMapRender(document.querySelectorAll('[data-message-author-role]'));
+        }
+      }
       pendingNewChatPromptHash = null;
       allowFirstVisibleUserCount = false;
     } catch (error) {
       console.error("Sentinel could not store conversation analysis:", error);
     } finally {
-      pendingSentimentFingerprints.delete(pendingKey);
+      pendingAnalysisKeys.delete(pendingKey);
+      miniMapIntentPendingKeys.delete(key);
     }
   } else {
     // Existing/history messages are not live prompts, but should still be
@@ -2192,8 +2759,11 @@ async function processMessage(msg) {
 }
 
 function scan() {
-  ensureRiskBar();
-  updateRiskBarFrame();
+  if (isSentinelTemporarilyDisabled()) {
+    clearConversationState(false);
+    removeManualTriggerUi();
+    return;
+  }
   if (handleConversationChange()) {
     setTimeout(scan, 120);
     return;
@@ -2206,8 +2776,13 @@ function scan() {
     allowFirstVisibleUserCount = isEmptyChatGptNewChatRoute();
     if (allowFirstVisibleUserCount) pendingNewChatPromptHash = null;
     if (miniMapEntries.size || riskMarkers.size) clearConversationState(false);
+    const riskBar = document.getElementById("tms-risk-bar");
+    if (riskBar) riskBar.style.display = "none";
     return;
   }
+
+  ensureRiskBar();
+  updateRiskBarFrame();
 
   const visibleSignature = getVisibleConversationSignature(allMessages);
   if (staleConversationSignature && visibleSignature === staleConversationSignature) {
@@ -2248,15 +2823,74 @@ const observer = new MutationObserver(mutations => {
 });
 
 observer.observe(document.body, { childList: true, subtree: true });
+
+// Capture the outgoing prompt before ChatGPT clears the composer. On a new
+// chat, the message node and permanent /c/<id> route are created in separate
+// React commits; remembering this hash makes their order irrelevant.
+document.addEventListener("keydown", event => {
+  if (event.isComposing || event.key !== "Enter" || event.shiftKey) return;
+  rememberSubmittedPrompt(findSubmissionComposer(event.target));
+}, true);
+
+document.addEventListener("click", event => {
+  if (!isSubmissionButton(event.target)) return;
+  const form = event.target.closest?.("form");
+  const composer = form
+    ? SUBMISSION_COMPOSER_SELECTORS
+      .map(selector => form.querySelector(selector))
+      .find(Boolean)
+    : findSubmissionComposer(event.target);
+  rememberSubmittedPrompt(composer);
+}, true);
+
+document.addEventListener("submit", event => {
+  const form = event.target instanceof HTMLFormElement ? event.target : null;
+  if (!form) return;
+  const composer = SUBMISSION_COMPOSER_SELECTORS
+    .map(selector => form.querySelector(selector))
+    .find(Boolean);
+  rememberSubmittedPrompt(composer);
+}, true);
+
+window.addEventListener("sentinel:temporary-chat-change", event => {
+  if (event.detail?.active) {
+    clearConversationState(false);
+    removeManualTriggerUi();
+    return;
+  }
+
+  // Anything left in the DOM from a temporary session must be treated as
+  // history, not as a newly submitted prompt when normal mode resumes.
+  initialScanComplete = false;
+  allowFirstVisibleUserCount = false;
+  pendingNewChatPromptHash = null;
+  conversationRestorePromise = restoreConversationSentiment(currentConversationKey, true);
+  setTimeout(scan, 180);
+});
 if (!MANUAL_TRIGGERS_ENABLED) removeManualTriggerUi();
-ensureRiskBar();
-conversationRestorePromise = restoreConversationSentiment(currentConversationKey);
-scan();
-setInterval(() => {
+if (isSentinelTemporarilyDisabled()) {
+  conversationRestorePromise = Promise.resolve();
+  removeManualTriggerUi();
+} else {
+  conversationRestorePromise = restoreConversationSentiment(currentConversationKey);
+  scan();
+  // ChatGPT can finish hydrating an existing conversation after the content
+  // scripts have loaded. These retries make startup deterministic even when no
+  // navigation or later DOM mutation occurs.
+  setTimeout(scan, 500);
+  setTimeout(scan, 1500);
+}
+const conversationMonitorInterval = setInterval(() => {
+  if (!hasExtensionContext()) {
+    clearInterval(conversationMonitorInterval);
+    observer.disconnect();
+    return;
+  }
+  if (isSentinelTemporarilyDisabled()) return;
   if (handleConversationChange()) setTimeout(scan, 120);
 }, 1000);
 
 // cleanup session snapshot on tab close
 window.addEventListener("pagehide", () => {
-  chrome.storage.local.remove("activeSession");
+  removeLocalStorage("activeSession");
 });

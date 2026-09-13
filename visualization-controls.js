@@ -6,14 +6,15 @@
   const DEFAULTS = Object.freeze({
     chatColors: true,
     triggerMinimap: true,
-    draftTone: true
+    draftTone: true,
+    newChatIntentions: true,
+    newChatWriting: true,
+    newChatReflection: true,
+    responseReflection: true
   });
-  const ANALYSIS_DELAY_MS = 750;
+  const ANALYSIS_DELAY_MS = 400;
   const MINIMUM_DRAFT_LENGTH = 3;
-  const VERY_NEGATIVE_CONFIDENCE = 0.9;
-  const NEW_CHAT_HEADING_TEXT =
-    "isto é a prova que conseguimos alterar o que está aqui escrito :)";
-  const NEW_CHAT_HEADING_ATTRIBUTE = "data-sentinel-new-chat-heading";
+  const VERY_NEGATIVE_SCORE = 0.9;
   const NEW_CHAT_SUGGESTION_ATTRIBUTE = "data-sentinel-hide-new-chat-suggestion";
   const NEW_CHAT_SUGGESTION_LABELS = new Set([
     "Create an image",
@@ -29,12 +30,23 @@
   let lastSentiment = null;
   let influentialWord = null;
   let positionFrame = null;
-  let modifiedNewChatHeading = null;
+
+  function hasExtensionContext() {
+    try {
+      return Boolean(chrome.runtime?.id);
+    } catch {
+      return false;
+    }
+  }
 
   function storageGet(keys) {
     return new Promise(resolve => {
       try {
-        chrome.storage.local.get(keys, result => resolve(result || {}));
+        if (!hasExtensionContext()) return resolve({});
+        chrome.storage.local.get(keys, result => {
+          if (chrome.runtime.lastError) return resolve({});
+          resolve(result || {});
+        });
       } catch {
         resolve({});
       }
@@ -44,9 +56,13 @@
   function storageSet(values) {
     return new Promise(resolve => {
       try {
-        chrome.storage.local.set(values, resolve);
+        if (!hasExtensionContext()) return resolve(false);
+        chrome.storage.local.set(values, () => {
+          if (chrome.runtime.lastError) return resolve(false);
+          resolve(true);
+        });
       } catch {
-        resolve();
+        resolve(false);
       }
     });
   }
@@ -120,6 +136,10 @@
     return String(value || "").replace(/\s+/g, " ").trim();
   }
 
+  function isSentinelTemporarilyDisabled() {
+    return document.documentElement.hasAttribute("data-sentinel-temporary-chat");
+  }
+
   function isChatGptNewChatScreen() {
     const path = location.pathname.replace(/\/+$/, "") || "/";
     return (
@@ -127,54 +147,6 @@
       path === "/" &&
       !document.querySelector('[data-message-author-role]')
     );
-  }
-
-  function restoreNewChatHeading() {
-    if (!modifiedNewChatHeading?.isConnected) {
-      modifiedNewChatHeading = null;
-      return;
-    }
-    const original = modifiedNewChatHeading.dataset.sentinelOriginalHeading;
-    if (typeof original === "string") modifiedNewChatHeading.textContent = original;
-    modifiedNewChatHeading.removeAttribute(NEW_CHAT_HEADING_ATTRIBUTE);
-    delete modifiedNewChatHeading.dataset.sentinelOriginalHeading;
-    modifiedNewChatHeading = null;
-  }
-
-  function applyNewChatHeading(activeComposer) {
-    if (!isChatGptNewChatScreen() || !activeComposer) {
-      restoreNewChatHeading();
-      return;
-    }
-
-    const composerRect = activeComposer.getBoundingClientRect();
-    const heading = Array.from(document.querySelectorAll("h1, h2, [role='heading']"))
-      .filter(isVisible)
-      .filter(element => !element.closest("nav, aside, [role='dialog']"))
-      .filter(element => {
-        const rect = element.getBoundingClientRect();
-        const horizontalDistance = Math.abs(
-          (rect.left + rect.width / 2) - (composerRect.left + composerRect.width / 2)
-        );
-        return rect.bottom <= composerRect.top + 12 && horizontalDistance < composerRect.width / 2;
-      })
-      .sort((a, b) =>
-        (composerRect.top - a.getBoundingClientRect().bottom) -
-        (composerRect.top - b.getBoundingClientRect().bottom)
-      )[0];
-
-    if (!heading) return;
-    if (modifiedNewChatHeading && modifiedNewChatHeading !== heading) {
-      restoreNewChatHeading();
-    }
-    if (!heading.hasAttribute(NEW_CHAT_HEADING_ATTRIBUTE)) {
-      heading.dataset.sentinelOriginalHeading = heading.textContent || "";
-      heading.setAttribute(NEW_CHAT_HEADING_ATTRIBUTE, "");
-    }
-    if (heading.textContent !== NEW_CHAT_HEADING_TEXT) {
-      heading.textContent = NEW_CHAT_HEADING_TEXT;
-    }
-    modifiedNewChatHeading = heading;
   }
 
   function applyNewChatSuggestionVisibility() {
@@ -378,13 +350,12 @@
       }
     </style>
     <div class="visuals-anchor" id="visualsAnchor">
-      <button class="visuals-button" id="visualsButton" type="button" aria-expanded="false" aria-controls="visualsPanel">
+      <button class="visuals-button" id="visualsButton" type="button" aria-label="Choose visualizations" title="Choose visualizations" aria-expanded="false" aria-controls="visualsPanel">
         <svg class="visuals-icon" viewBox="0 0 24 24" aria-hidden="true">
           <path d="M4 7h10M18 7h2M4 17h2M10 17h10"></path>
           <circle cx="16" cy="7" r="2"></circle>
           <circle cx="8" cy="17" r="2"></circle>
         </svg>
-        <span>Visuals</span>
       </button>
       <div class="panel" id="visualsPanel" hidden>
         <p class="heading">Visualizations</p>
@@ -400,6 +371,22 @@
           <span class="option-title">Conversation minimap</span>
           <input class="switch" id="minimapToggle" type="checkbox">
         </label>
+        <label class="option">
+          <span class="option-title">Interaction focus</span>
+          <input class="switch" id="newChatIntentionsToggle" type="checkbox">
+        </label>
+        <label class="option">
+          <span class="option-title">Writing process</span>
+          <input class="switch" id="newChatWritingToggle" type="checkbox">
+        </label>
+        <label class="option">
+          <span class="option-title">Prompt tone</span>
+          <input class="switch" id="newChatReflectionToggle" type="checkbox">
+        </label>
+        <label class="option">
+          <span class="option-title">Post-response reflection</span>
+          <input class="switch" id="responseReflectionToggle" type="checkbox">
+        </label>
       </div>
     </div>
     <span class="tone" id="toneIndicator" data-state="idle" aria-hidden="true"></span>
@@ -407,6 +394,8 @@
     <span class="sr-only" id="toneStatus" aria-live="polite">Prompt tone preview waiting</span>
   `;
   document.documentElement.appendChild(host);
+
+  window.__sentinelBindShadowTheme?.(shadow);
 
   const visualsAnchor = shadow.getElementById("visualsAnchor");
   const visualsButton = shadow.getElementById("visualsButton");
@@ -417,6 +406,10 @@
   const draftToneToggle = shadow.getElementById("draftToneToggle");
   const chatColorsToggle = shadow.getElementById("chatColorsToggle");
   const minimapToggle = shadow.getElementById("minimapToggle");
+  const newChatIntentionsToggle = shadow.getElementById("newChatIntentionsToggle");
+  const newChatWritingToggle = shadow.getElementById("newChatWritingToggle");
+  const newChatReflectionToggle = shadow.getElementById("newChatReflectionToggle");
+  const responseReflectionToggle = shadow.getElementById("responseReflectionToggle");
 
   function setToneState(state, label) {
     toneIndicator.dataset.state = state;
@@ -435,7 +428,7 @@
 
   function displaySentiment(sentiment) {
     const toneState = sentiment?.label === "negative" &&
-      Number(sentiment.confidence) >= VERY_NEGATIVE_CONFIDENCE
+      Number(sentiment.score) >= VERY_NEGATIVE_SCORE
       ? "very-negative"
       : sentiment?.label;
     const states = {
@@ -457,12 +450,16 @@
   }
 
   async function analyzeDraft(text, sequence) {
+    if (!hasExtensionContext()) {
+      setToneState("error", "Prompt tone preview unavailable");
+      return;
+    }
     setToneState("loading", "Analysing prompt tone locally", "…");
     try {
       const response = await chrome.runtime.sendMessage({
         type: "sentinel:analyze-sentiment",
         text,
-        explain: true
+        explain: false
       });
       if (sequence !== analysisSequence || text !== getDraftText()) return;
       if (!response?.ok || !response.sentiment) {
@@ -471,12 +468,27 @@
       }
       lastAnalyzedText = text;
       lastSentiment = response.sentiment;
-      influentialWord = response.influentialWord || null;
+      influentialWord = null;
       displaySentiment(lastSentiment);
       schedulePosition();
       console.info(
-        `Sentinel prompt tone preview: ${lastSentiment.label} (${lastSentiment.confidence})`
+        `Sentinel prompt tone preview: ${lastSentiment.label} (${lastSentiment.score})`
       );
+
+      // Word influence requires several additional model comparisons. Resolve
+      // it after displaying the tone so it can never delay the coloured dot.
+      chrome.runtime.sendMessage({
+        type: "sentinel:analyze-sentiment",
+        text,
+        explain: true
+      }).then(explanation => {
+        if (sequence !== analysisSequence || text !== getDraftText()) return;
+        if (!explanation?.ok) return;
+        influentialWord = explanation.influentialWord || null;
+        schedulePosition();
+      }).catch(() => {
+        // Keep the tone visible if the optional explanation is unavailable.
+      });
     } catch {
       if (sequence === analysisSequence) {
         setToneState("error", "Prompt tone preview unavailable");
@@ -488,6 +500,10 @@
     clearTimeout(analysisTimer);
     analysisSequence += 1;
 
+    if (isSentinelTemporarilyDisabled()) {
+      resetToneState();
+      return;
+    }
     if (!preferences.draftTone) return;
     const text = getDraftText();
     if (text.length < MINIMUM_DRAFT_LENGTH) {
@@ -511,6 +527,10 @@
     draftToneToggle.checked = preferences.draftTone;
     chatColorsToggle.checked = preferences.chatColors;
     minimapToggle.checked = preferences.triggerMinimap;
+    newChatIntentionsToggle.checked = preferences.newChatIntentions;
+    newChatWritingToggle.checked = preferences.newChatWriting;
+    newChatReflectionToggle.checked = preferences.newChatReflection;
+    responseReflectionToggle.checked = preferences.responseReflection;
     toneIndicator.hidden = !preferences.draftTone;
     document.documentElement.toggleAttribute(
       "data-sentinel-hide-trigger-minimap",
@@ -529,7 +549,11 @@
     preferences = {
       draftTone: draftToneToggle.checked,
       chatColors: chatColorsToggle.checked,
-      triggerMinimap: minimapToggle.checked
+      triggerMinimap: minimapToggle.checked,
+      newChatIntentions: newChatIntentionsToggle.checked,
+      newChatWriting: newChatWritingToggle.checked,
+      newChatReflection: newChatReflectionToggle.checked,
+      responseReflection: responseReflectionToggle.checked
     };
     syncPreferenceControls();
     await storageSet({ [STORAGE_KEY]: preferences });
@@ -546,7 +570,15 @@
     visualsPanel.hidden = !willOpen;
     visualsButton.setAttribute("aria-expanded", String(willOpen));
   });
-  [draftToneToggle, chatColorsToggle, minimapToggle].forEach(input => {
+  [
+    draftToneToggle,
+    chatColorsToggle,
+    minimapToggle,
+    newChatIntentionsToggle,
+    newChatWritingToggle,
+    newChatReflectionToggle,
+    responseReflectionToggle
+  ].forEach(input => {
     input.addEventListener("change", savePreferences);
   });
   document.addEventListener("pointerdown", event => {
@@ -651,12 +683,36 @@
 
   function positionControls() {
     positionFrame = null;
+    if (isSentinelTemporarilyDisabled()) {
+      clearTimeout(analysisTimer);
+      analysisSequence += 1;
+      composer = null;
+      document
+        .querySelectorAll(`[${NEW_CHAT_SUGGESTION_ATTRIBUTE}]`)
+        .forEach(element => element.removeAttribute(NEW_CHAT_SUGGESTION_ATTRIBUTE));
+      resetToneState();
+      host.style.display = "none";
+      return;
+    }
     const nextComposer = findComposer();
-    applyNewChatHeading(nextComposer);
     applyNewChatSuggestionVisibility();
     const shareControl = findTopBarAction("share");
     const overflowControl = findTopBarAction("overflow");
-    const headerAnchor = shareControl || overflowControl;
+    const privacyButton = document
+      .getElementById("sentinel-privacy-review")
+      ?.shadowRoot
+      ?.getElementById("privacyButton");
+    const privacyRect = privacyButton?.getBoundingClientRect();
+    const privacyButtonIsVisible = Boolean(
+      privacyButton?.isConnected &&
+      privacyRect?.width > 20 &&
+      privacyRect?.height > 20 &&
+      privacyRect.bottom > 0 &&
+      privacyRect.right > 0
+    );
+    const headerAnchor = privacyButtonIsVisible
+      ? privacyButton
+      : shareControl || overflowControl;
 
     if (!nextComposer && !headerAnchor) {
       composer = null;
@@ -721,15 +777,22 @@
   document.addEventListener("compositionend", scheduleDraftAnalysis, true);
   window.addEventListener("resize", schedulePosition, { passive: true });
   window.addEventListener("scroll", schedulePosition, { passive: true });
+  window.addEventListener("sentinel:temporary-chat-change", schedulePosition);
 
   const observer = new MutationObserver(schedulePosition);
   observer.observe(document.body, { childList: true, subtree: true });
 
-  chrome.storage.onChanged.addListener((changes, areaName) => {
-    if (areaName !== "local" || !changes[STORAGE_KEY]) return;
-    preferences = { ...DEFAULTS, ...(changes[STORAGE_KEY].newValue || {}) };
-    syncPreferenceControls();
-  });
+  try {
+    if (hasExtensionContext()) {
+      chrome.storage.onChanged.addListener((changes, areaName) => {
+        if (areaName !== "local" || !changes[STORAGE_KEY]) return;
+        preferences = { ...DEFAULTS, ...(changes[STORAGE_KEY].newValue || {}) };
+        syncPreferenceControls();
+      });
+    }
+  } catch {
+    observer.disconnect();
+  }
 
   storageGet([STORAGE_KEY]).then(stored => {
     preferences = { ...DEFAULTS, ...(stored[STORAGE_KEY] || {}) };
