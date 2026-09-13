@@ -1,12 +1,12 @@
-# Sentinel - Reflective Awareness Monitor
+# My AI Mirror - Reflective Awareness Monitor
 
-Sentinel is a research prototype that helps people reflect on how they use AI
+My AI Mirror is a research prototype that helps people reflect on how they use AI
 chatbots. It highlights interaction patterns without diagnosing the user or
 assigning a dependency, ability, or wellbeing score.
 
 ## Local language analysis
 
-Sentinel currently runs two ONNX models in the browser:
+My AI Mirror currently runs two ONNX models in the browser:
 
 - CardiffNLP Twitter RoBERTa classifies submitted prompts as positive, neutral,
   or negative.
@@ -17,19 +17,19 @@ Sentinel currently runs two ONNX models in the browser:
 Model files are downloaded from Hugging Face on first use and cached by the
 browser. Inference then runs locally through Transformers.js and ONNX Runtime
 Web. Prompt text is used only for the inference call and is not saved by
-Sentinel. Persistent analysis storage contains only each submitted prompt's
+My AI Mirror. Persistent analysis storage contains only each submitted prompt's
 sentiment classification and score, plus its intention classifications and
 scores. Counts, rates, averages, and summaries are calculated when needed and
 are not persisted. Timestamps and message identifiers are not included.
 
-The records are grouped under a hashed conversation identifier so Sentinel can
+The records are grouped under a hashed conversation identifier so My AI Mirror can
 calculate patterns for each chat without storing the ChatGPT conversation URL.
 Message de-duplication identifiers are session-only and are not included in
 persistent extension storage.
 
 ## Behavioural interaction metrics
 
-Sentinel measures three process-level signals while a prompt is being written:
+My AI Mirror measures three process-level signals while a prompt is being written:
 
 - copy-pasting counts paste events, including pasted images, without reading or
   saving clipboard content;
@@ -38,7 +38,7 @@ Sentinel measures three process-level signals while a prompt is being written:
   deleting five characters consecutively counts as five editing actions but
   one revision episode.
 
-Only aggregate numeric totals are persisted. Sentinel does not persist raw
+Only aggregate numeric totals are persisted. My AI Mirror does not persist raw
 keystrokes, draft text, pasted content, hesitation time, or drafting time. The
 current prompt's numeric counts are reported in the browser console and are not
 yet used in a user-facing visualization.
@@ -70,18 +70,18 @@ to persistent storage.
 
 ## Post-response reflection
 
-After a completed assistant response, Sentinel can show a compact, optional
+After a completed assistant response, My AI Mirror can show a compact, optional
 reflection asking the user to notice how the response affected their thinking:
 whether it created understanding, prompted independent reasoning, invited
 further questioning, or was accepted as given. The selected category is stored
 locally against a hashed conversation identifier; neither the prompt nor the
-response text is saved. The card can be disabled from Sentinel's visualization
+response text is saved. The card can be disabled from My AI Mirror's visualization
 controls and is not shown in temporary chats.
 
 ## All-chat usage overview
 
 A small plus button beside ChatGPT's search control opens a local overview of
-usage across every chat represented in Sentinel's storage. Unlike the raw
+usage across every chat represented in My AI Mirror's storage. Unlike the raw
 summaries on the new-chat screen, this panel combines signals to show active
 engagement versus delegation, recurring intention combinations, writing
 behaviour grouped by each chat's dominant intention, sentiment-intention
