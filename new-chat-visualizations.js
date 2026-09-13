@@ -84,6 +84,15 @@
     return rect.width > 40 && rect.height > 15;
   }
 
+  function isLoggedOutChatGpt() {
+    const labels = Array.from(document.querySelectorAll('a, button, [role="button"]'))
+      .filter(isVisible)
+      .map(element => String(element.innerText || element.textContent || "")
+        .replace(/\s+/g, " ").trim());
+    return labels.some(label => /^log in$/i.test(label)) &&
+      labels.some(label => /^sign up(?: for free)?$/i.test(label));
+  }
+
   function findComposer() {
     for (const selector of COMPOSER_SELECTORS) {
       const candidates = Array.from(document.querySelectorAll(selector))
@@ -149,6 +158,7 @@
     return (
       (location.hostname === "chatgpt.com" || location.hostname === "chat.openai.com") &&
       path === "/" &&
+      !isLoggedOutChatGpt() &&
       !document.querySelector('[data-message-author-role]')
     );
   }
@@ -760,7 +770,8 @@
 
   function position() {
     frame = null;
-    const disabled = document.documentElement.hasAttribute("data-sentinel-temporary-chat");
+    const disabled = document.documentElement.hasAttribute("data-sentinel-temporary-chat") ||
+      isLoggedOutChatGpt();
     const anyEnabled = preferences.newChatIntentions ||
       preferences.newChatWriting ||
       preferences.newChatReflection;

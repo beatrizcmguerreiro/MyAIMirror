@@ -18,6 +18,18 @@
     }
   }
 
+  function isLoggedOutChatGpt() {
+    const labels = Array.from(document.querySelectorAll('a, button, [role="button"]'))
+      .filter(element => {
+        const rect = element.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      })
+      .map(element => String(element.innerText || element.textContent || "")
+        .replace(/\s+/g, " ").trim());
+    return labels.some(label => /^log in$/i.test(label)) &&
+      labels.some(label => /^sign up(?: for free)?$/i.test(label));
+  }
+
   function storageGet(keys) {
     return new Promise(resolve => {
       try {
@@ -128,6 +140,10 @@
   }
 
   function showPrivacyReviewButton() {
+    if (isLoggedOutChatGpt()) {
+      removePrivacyReviewButton();
+      return;
+    }
     if (document.getElementById(REVIEW_ROOT_ID)) return;
 
     updateTemporaryChatMode();
@@ -273,7 +289,7 @@
 
   function enableSentinel() {
     if (document.documentElement.dataset.sentinelFeaturesRequested === "true") return;
-    if (!hasExtensionContext()) return;
+    if (!hasExtensionContext() || isLoggedOutChatGpt()) return;
     document.documentElement.dataset.sentinelFeaturesRequested = "true";
     try {
       chrome.runtime.sendMessage({ type: "sentinel:enable-page-features" }, response => {
@@ -288,6 +304,7 @@
   }
 
   function showNotice() {
+    if (isLoggedOutChatGpt()) return;
     if (document.getElementById(ROOT_ID)) return;
     if (sessionStorage.getItem(DISMISSED_KEY) === "true") {
       showPrivacyReviewButton();

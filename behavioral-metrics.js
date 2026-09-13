@@ -29,8 +29,21 @@
   function isDisabled() {
     const today = localDateKey(new Date());
     return document.documentElement.hasAttribute("data-sentinel-temporary-chat") ||
+      isLoggedOutChatGpt() ||
       today < STUDY_START_DATE ||
       today > STUDY_END_DATE;
+  }
+
+  function isLoggedOutChatGpt() {
+    const labels = Array.from(document.querySelectorAll('a, button, [role="button"]'))
+      .filter(element => {
+        const rect = element.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      })
+      .map(element => String(element.innerText || element.textContent || "")
+        .replace(/\s+/g, " ").trim());
+    return labels.some(label => /^log in$/i.test(label)) &&
+      labels.some(label => /^sign up(?: for free)?$/i.test(label));
   }
 
   function hasExtensionContext() {

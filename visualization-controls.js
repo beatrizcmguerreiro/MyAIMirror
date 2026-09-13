@@ -73,6 +73,15 @@
     return rect.width > 40 && rect.height > 15;
   }
 
+  function isLoggedOutChatGpt() {
+    const labels = Array.from(document.querySelectorAll('a, button, [role="button"]'))
+      .filter(isVisible)
+      .map(element => String(element.innerText || element.textContent || "")
+        .replace(/\s+/g, " ").trim());
+    return labels.some(label => /^log in$/i.test(label)) &&
+      labels.some(label => /^sign up(?: for free)?$/i.test(label));
+  }
+
   function findTopBarAction(kind) {
     const candidates = Array.from(
       document.querySelectorAll('button, a, [role="button"]')
@@ -137,7 +146,8 @@
   }
 
   function isSentinelTemporarilyDisabled() {
-    return document.documentElement.hasAttribute("data-sentinel-temporary-chat");
+    return document.documentElement.hasAttribute("data-sentinel-temporary-chat") ||
+      isLoggedOutChatGpt();
   }
 
   function isChatGptNewChatScreen() {
