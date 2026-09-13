@@ -8,6 +8,8 @@
   const SESSION_KEY = "tms_behaviouralMetrics";
   const SESSION_VERSION_KEY = "tms_behaviouralMetricsVersion";
   const METRICS_VERSION = 5;
+  const STUDY_START_DATE = "2026-09-14";
+  const STUDY_END_DATE = "2026-09-19";
   const EDIT_EPISODE_GAP_MS = 1200;
   const COMPOSER_SELECTORS = [
     "#prompt-textarea",
@@ -25,7 +27,10 @@
   const knownUserMessages = new WeakSet();
 
   function isDisabled() {
-    return document.documentElement.hasAttribute("data-sentinel-temporary-chat");
+    const today = localDateKey(new Date());
+    return document.documentElement.hasAttribute("data-sentinel-temporary-chat") ||
+      today < STUDY_START_DATE ||
+      today > STUDY_END_DATE;
   }
 
   function hasExtensionContext() {
@@ -101,6 +106,13 @@
       target[key] += source[key];
     });
     return target;
+  }
+
+  function localDateKey(date) {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, "0");
+    const day = String(date.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
   }
 
   async function sha256Fingerprint(value) {
@@ -222,7 +234,8 @@
 
     persistenceQueue = persistenceQueue.then(async () => {
       const conversationId = await waitForConversationStorageId();
-      const today = new Date().toISOString().slice(0, 10);
+      const capturedAt = new Date(record?.recordedAt || Date.now());
+      const today = localDateKey(capturedAt);
       const stored = await storageGet([STORAGE_KEY]);
       const state = stored[STORAGE_KEY] || {};
       const totals = addRecord(normaliseTotals(state.totals), record);
@@ -431,6 +444,7 @@
     if (!draft?.awaitingSubmission || draft.finalised || isDisabled()) return;
     draft.finalised = true;
     const record = {
+      recordedAt: new Date().toISOString(),
       pasteEvents: draft.pasteEvents,
       editActions: draft.editActions,
       revisionEpisodes: draft.revisionEpisodes

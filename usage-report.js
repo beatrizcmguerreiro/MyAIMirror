@@ -10,6 +10,8 @@
   const BEHAVIOURAL_KEY = "sentinelBehaviouralMetricsV1";
   const REFLECTIONS_KEY = "sentinelPostResponseReflectionsV1";
   const THEMES_KEY = "sentinelThemeMetricsV1";
+  const STUDY_START_DATE = "2026-09-14";
+  const STUDY_END_DATE = "2026-09-19";
   const INTENTIONS = [
     { key: "learning", label: "Learning", color: "#f8b98f" },
     { key: "reasoning", label: "User reasoning", color: "#9ed9aa" },
@@ -127,7 +129,10 @@
   }
 
   function dateKey(date) {
-    return date.toISOString().slice(0, 10);
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, "0");
+    const day = String(date.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
   }
 
   function reconcileDailyPromptTotal(daily, promptTotal) {
@@ -136,66 +141,65 @@
     );
     const datedPromptTotal = Object.values(reconciled)
       .reduce((total, values) => total + number(values?.prompts), 0);
-    const missingPrompts = Math.max(0, number(promptTotal) - datedPromptTotal);
-    if (!missingPrompts) return reconciled;
-
-    const today = dateKey(new Date());
-    reconciled[today] = {
-      ...emptyBehaviourTotals(),
-      ...(reconciled[today] || {}),
-      prompts: number(reconciled[today]?.prompts) + missingPrompts
+    return {
+      daily: reconciled,
+      undatedPrompts: Math.max(0, number(promptTotal) - datedPromptTotal)
     };
-    return reconciled;
+  }
+
+  function isStudyDateKey(key) {
+    return key >= STUDY_START_DATE && key <= STUDY_END_DATE;
+  }
+
+  function filterStudyDaily(daily) {
+    return Object.fromEntries(
+      Object.entries(daily || {}).filter(([key]) => isStudyDateKey(key))
+    );
+  }
+
+  function totalsFromDaily(daily) {
+    return Object.values(daily || {}).reduce(
+      (totals, values) => addBehaviourTotals(totals, values),
+      emptyBehaviourTotals()
+    );
+  }
+
+  function recordIsInStudy(record) {
+    const capturedAt = new Date(record?.recordedAt || "");
+    return !Number.isNaN(capturedAt.getTime()) && isStudyDateKey(dateKey(capturedAt));
   }
 
   function lastEightWeeks(daily) {
-    const weeks = [];
+    const start = new Date(2026, 8, 14);
+    const end = new Date(2026, 8, 19);
     const now = new Date();
-    const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
-    const currentMonday = new Date(today);
-    currentMonday.setUTCDate(today.getUTCDate() - ((today.getUTCDay() + 6) % 7));
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    let prompts = 0;
+    const days = [];
 
-    for (let offset = 7; offset >= 0; offset -= 1) {
-      const start = new Date(currentMonday);
-      start.setUTCDate(currentMonday.getUTCDate() - offset * 7);
-      const end = new Date(start);
-      end.setUTCDate(start.getUTCDate() + 6);
-      let prompts = 0;
-      const days = [];
-      for (let dayOffset = 0; dayOffset < 7; dayOffset += 1) {
-        const day = new Date(start);
-        day.setUTCDate(start.getUTCDate() + dayOffset);
-        const observed = day <= today;
-        const dayPrompts = observed ? number(daily?.[dateKey(day)]?.prompts) : null;
-        if (observed) prompts += dayPrompts;
-        days.push({
-          key: dateKey(day),
-          label: day.toLocaleDateString(undefined, { weekday: "short", timeZone: "UTC" }),
-          dateLabel: day.toLocaleDateString(undefined, { day: "numeric", month: "short", timeZone: "UTC" }),
-          prompts: dayPrompts,
-          observed
-        });
-      }
-      weeks.push({
-        key: dateKey(start),
-        endKey: dateKey(end),
-        label: start.toLocaleDateString(undefined, {
-          day: "numeric",
-          month: "short",
-          timeZone: "UTC"
-        }),
-        fullLabel: `${start.toLocaleDateString(undefined, { day: "numeric", month: "short", timeZone: "UTC" })} - ${end.toLocaleDateString(undefined, { day: "numeric", month: "short", timeZone: "UTC" })}`,
-        prompts,
-        days
+    for (let dayOffset = 0; dayOffset < 6; dayOffset += 1) {
+      const day = new Date(start);
+      day.setDate(start.getDate() + dayOffset);
+      const observed = day <= today;
+      const dayPrompts = observed ? number(daily?.[dateKey(day)]?.prompts) : null;
+      if (observed) prompts += dayPrompts;
+      days.push({
+        key: dateKey(day),
+        label: day.toLocaleDateString(undefined, { weekday: "short" }),
+        dateLabel: day.toLocaleDateString(undefined, { day: "numeric", month: "short" }),
+        prompts: dayPrompts,
+        observed
       });
     }
-    const firstTrackedDate = Object.entries(daily || {})
-      .filter(([, totals]) => number(totals?.prompts) > 0)
-      .map(([key]) => key)
-      .sort()[0];
-    if (!firstTrackedDate) return weeks.slice(-1);
-    const firstVisibleWeek = weeks.findIndex(week => week.endKey >= firstTrackedDate);
-    return firstVisibleWeek >= 0 ? weeks.slice(firstVisibleWeek) : weeks;
+
+    return [{
+      key: STUDY_START_DATE,
+      endKey: STUDY_END_DATE,
+      label: start.toLocaleDateString(undefined, { day: "numeric", month: "short" }),
+      fullLabel: `${start.toLocaleDateString(undefined, { day: "numeric", month: "short" })} - ${end.toLocaleDateString(undefined, { day: "numeric", month: "short" })}`,
+      prompts,
+      days
+    }];
   }
 
   function aggregateReport(stored, includedConversationIds = null) {
@@ -204,11 +208,23 @@
       : null;
     const includeEntry = ([conversationId]) => !scope || scope.has(conversationId);
     const conversations = Object.fromEntries(
-      Object.entries(stored[ANALYSES_KEY] || {}).filter(includeEntry)
+      Object.entries(stored[ANALYSES_KEY] || {})
+        .filter(includeEntry)
+        .map(([conversationId, records]) => [
+          conversationId,
+          (Array.isArray(records) ? records : []).filter(recordIsInStudy)
+        ])
+        .filter(([, records]) => records.length)
     );
     const storedBehavioural = stored[BEHAVIOURAL_KEY] || {};
     const behaviouralConversations = Object.fromEntries(
-      Object.entries(storedBehavioural.conversations || {}).filter(includeEntry)
+      Object.entries(storedBehavioural.conversations || {})
+        .filter(includeEntry)
+        .map(([conversationId, conversation]) => {
+          const daily = filterStudyDaily(conversation?.daily);
+          return [conversationId, { totals: totalsFromDaily(daily), daily }];
+        })
+        .filter(([, conversation]) => number(conversation.totals.prompts) > 0)
     );
     const scopedBehaviourTotals = Object.values(behaviouralConversations)
       .reduce((totals, conversation) => addBehaviourTotals(totals, conversation?.totals || conversation), emptyBehaviourTotals());
@@ -221,6 +237,7 @@
         );
       });
     });
+    const unscopedDaily = filterStudyDaily(storedBehavioural.daily);
     const behavioural = scope
       ? {
         ...storedBehavioural,
@@ -228,21 +245,28 @@
         daily: scopedDaily,
         conversations: behaviouralConversations
       }
-      : storedBehavioural;
+      : {
+        ...storedBehavioural,
+        totals: totalsFromDaily(unscopedDaily),
+        daily: unscopedDaily,
+        conversations: behaviouralConversations
+      };
     const reflections = (Array.isArray(stored[REFLECTIONS_KEY])
       ? stored[REFLECTIONS_KEY]
-      : []).filter(record => !scope || scope.has(record?.conversationId));
+      : []).filter(record => {
+        if (scope && !scope.has(record?.conversationId)) return false;
+        const createdAt = new Date(Number(record?.createdAt));
+        return !Number.isNaN(createdAt.getTime()) && isStudyDateKey(dateKey(createdAt));
+      });
     const themeConversations = Object.fromEntries(
       Object.entries(stored[THEMES_KEY]?.conversations || {}).filter(includeEntry)
     );
     const analyses = Object.values(conversations).flatMap(records =>
       Array.isArray(records) ? records : []
     );
-    const conversationIds = scope || new Set([
+    const conversationIds = new Set([
       ...Object.keys(conversations),
-      ...Object.keys(behavioural.conversations || {}),
-      ...Object.keys(themeConversations),
-      ...reflections.map(record => record?.conversationId).filter(Boolean)
+      ...Object.keys(behavioural.conversations || {})
     ]);
 
     const behaviour = behavioural.totals || {};
@@ -266,7 +290,8 @@
     const datedPromptRecords = analysisTimelineIsComplete
       ? analysisDaily
       : (behavioural.daily || {});
-    const reportDaily = reconcileDailyPromptTotal(datedPromptRecords, prompts);
+    const reconciledTimeline = reconcileDailyPromptTotal(datedPromptRecords, prompts);
+    const reportDaily = reconciledTimeline.daily;
     const weeks = lastEightWeeks(reportDaily);
     const eightWeekPrompts = weeks.reduce((total, week) => total + week.prompts, 0);
     const activeDays = Object.values(reportDaily)
@@ -343,6 +368,7 @@
       weeklyAverage: eightWeekPrompts / weeks.length,
       weekCount: weeks.length,
       weeks,
+      undatedPrompts: reconciledTimeline.undatedPrompts,
       analysedPrompts,
       intentionsAnalysed,
       totalIntentionSignals,

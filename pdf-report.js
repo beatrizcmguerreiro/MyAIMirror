@@ -422,7 +422,8 @@
     );
     const maximum = Math.max(1, ...observedValues);
     const axisMaximum = Math.max(4, Math.ceil(maximum / 4) * 4);
-    const xFor = index => chart.left + (index / 6) * (chart.right - chart.left);
+    const dayCount = Math.max(2, series[0]?.days?.length || 7);
+    const xFor = index => chart.left + (index / (dayCount - 1)) * (chart.right - chart.left);
     const yFor = value => chart.bottom - (Number(value || 0) / axisMaximum) * (chart.bottom - chart.top);
 
     for (let step = 0; step <= 4; step += 1) {
@@ -477,15 +478,23 @@
     metricCard(pages[0], MARGIN + (cardWidth + cardGap) * 2, 130, cardWidth, data.activeDays || 0, "Active days");
     technicalSection(pages[0], "Daily prompt frequency", "", 231);
     const graphBottom = technicalWeeklyGraph(pages[0], data, 239);
+    const weeklyRows = (data.weeks || []).map(week => [
+      week.fullLabel || week.label,
+      week.prompts || 0,
+      `${data.prompts ? Math.round((week.prompts / data.prompts) * 100) : 0}%`
+    ]);
+    if (data.undatedPrompts) {
+      weeklyRows.push([
+        "Date unavailable",
+        data.undatedPrompts,
+        `${data.prompts ? Math.round((data.undatedPrompts / data.prompts) * 100) : 0}%`
+      ]);
+    }
     drawTable(pages[0], graphBottom + 6, [
       { label: "Calendar week", width: 325 },
       { label: "Prompts", width: 90, align: "right", bold: true },
       { label: "% of period", width: 92, align: "right" }
-    ], (data.weeks || []).map(week => [
-      week.fullLabel || week.label,
-      week.prompts || 0,
-      `${data.eightWeekPrompts ? Math.round((week.prompts / data.eightWeekPrompts) * 100) : 0}%`
-    ]), { rowHeight: 20, fontSize: 8.2 });
+    ], weeklyRows, { rowHeight: 20, fontSize: 8.2 });
 
     technicalHeader(pages[1], "02", "Usage patterns", "");
     const page = pages[1];
@@ -575,7 +584,12 @@
     const blob = new Blob([bytes], { type: "application/pdf" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
-    const date = new Date().toISOString().slice(0, 10);
+    const now = new Date();
+    const date = [
+      now.getFullYear(),
+      String(now.getMonth() + 1).padStart(2, "0"),
+      String(now.getDate()).padStart(2, "0")
+    ].join("-");
     link.href = url;
     link.download = `my-ai-mirror-report-${date}.pdf`;
     link.style.display = "none";

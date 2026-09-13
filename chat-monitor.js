@@ -28,7 +28,8 @@ function normalizeMessageText(text) {
 }
 
 function isSentinelTemporarilyDisabled() {
-  return document.documentElement.hasAttribute("data-sentinel-temporary-chat");
+  return document.documentElement.hasAttribute("data-sentinel-temporary-chat") ||
+    !isWithinStudyWindow();
 }
 
 function hasExtensionContext() {
@@ -111,6 +112,8 @@ function tmsHash(str) {
 }
 
 const ANALYSIS_CONVERSATIONS_KEY = "conversationAnalysesV1";
+const STUDY_START_DATE = "2026-09-14";
+const STUDY_END_DATE = "2026-09-19";
 const SENTIMENT_METHOD = "cardiff-twitter-roberta-sentiment-latest";
 const SENTIMENT_VERSION = "f3ec4d0925f90c3ca7ee7814f52d6ee7cf180445-q8";
 const INTENT_LABEL_KEYS = [
@@ -122,6 +125,18 @@ const INTENT_LABEL_KEYS = [
 let analysisPersistenceQueue = Promise.resolve();
 const pendingAnalysisKeys = new Set();
 let lastSuccessfulAnalysisSave = null;
+
+function localDateKey(date = new Date()) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function isWithinStudyWindow(date = new Date()) {
+  const key = localDateKey(date);
+  return key >= STUDY_START_DATE && key <= STUDY_END_DATE;
+}
 
 function getLocalStorage(keys) {
   return new Promise(resolve => {
@@ -526,6 +541,9 @@ function persistConversationAnalysis(
   intent,
   existingAnalysisIndex = null
 ) {
+  if (!isWithinStudyWindow()) {
+    return Promise.resolve({ saved: false, index: null });
+  }
   const operation = analysisPersistenceQueue.then(async () => {
     const stored = await getLocalStorage([ANALYSIS_CONVERSATIONS_KEY]);
     const conversations = stored[ANALYSIS_CONVERSATIONS_KEY] || {};
